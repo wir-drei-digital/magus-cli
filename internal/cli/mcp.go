@@ -19,7 +19,7 @@ Designed to be launched by MCP-aware clients like Claude Desktop or Cursor.`,
 			if err != nil {
 				return err
 			}
-			return mcp.Serve(cmd.Context(), c)
+			return mcp.Serve(cmd.Context(), c, Version)
 		},
 	}
 }

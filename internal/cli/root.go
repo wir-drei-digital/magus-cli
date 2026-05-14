@@ -11,7 +11,6 @@ var (
 	profile   string
 	jsonMode  bool
 	quietMode bool
-	noColor   bool
 )
 
 func newRootCmd() *cobra.Command {
@@ -32,7 +31,6 @@ for use with Claude Desktop, Cursor, and other MCP-aware clients.`,
 	cmd.PersistentFlags().StringVar(&profile, "profile", "", "override active profile")
 	cmd.PersistentFlags().BoolVar(&jsonMode, "json", false, "machine-readable JSON output")
 	cmd.PersistentFlags().BoolVar(&quietMode, "quiet", false, "suppress non-error output")
-	cmd.PersistentFlags().BoolVar(&noColor, "no-color", false, "disable color output")
 
 	cmd.AddCommand(
 		newVersionCmd(),

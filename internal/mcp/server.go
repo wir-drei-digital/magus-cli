@@ -9,10 +9,13 @@ import (
 )
 
 // Serve runs the MCP stdio server, registering all brain tools.
-func Serve(_ context.Context, client *api.Client) error {
+func Serve(_ context.Context, client *api.Client, version string) error {
+	if version == "" {
+		version = "dev"
+	}
 	s := server.NewMCPServer(
 		"magus-brain",
-		"0.1.0",
+		version,
 		server.WithToolCapabilities(true),
 	)
 

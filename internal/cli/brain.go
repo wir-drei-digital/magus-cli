@@ -28,7 +28,7 @@ func loadClient() (*api.Client, error) {
 		return nil, fmt.Errorf("no token configured (run `magus login`)")
 	}
 	url := config.ResolveAPIURL(cfg, profile, DefaultAPIURL)
-	return api.New(url, token), nil
+	return api.New(url, token, "magus-cli/"+Version), nil
 }
 
 func brainListCmd() *cobra.Command {

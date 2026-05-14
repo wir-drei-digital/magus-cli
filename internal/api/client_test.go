@@ -18,7 +18,7 @@ func TestClientAddsBearerAuth(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := New(server.URL, "test_token")
+	c := New(server.URL, "test_token", "")
 	var out struct {
 		ID string `json:"id"`
 	}
@@ -37,7 +37,7 @@ func TestClientErrorResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := New(server.URL, "bad")
+	c := New(server.URL, "bad", "")
 	var out any
 	err := c.Get("/brains", &out)
 	if err == nil {
@@ -63,7 +63,7 @@ func TestClientPostJSON(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := New(server.URL, "tok")
+	c := New(server.URL, "tok", "")
 	var out struct {
 		ID string `json:"id"`
 	}

@@ -13,17 +13,22 @@ import (
 
 // Client speaks the Magus /api/v2 protocol with a Bearer token.
 type Client struct {
-	baseURL string
-	token   string
-	http    *http.Client
+	baseURL   string
+	token     string
+	userAgent string
+	http      *http.Client
 }
 
 // New returns a client. baseURL is e.g. "https://magus.digital".
-func New(baseURL, token string) *Client {
+func New(baseURL, token, userAgent string) *Client {
+	if userAgent == "" {
+		userAgent = "magus-cli/dev"
+	}
 	return &Client{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		token:   token,
-		http:    &http.Client{Timeout: 30 * time.Second},
+		baseURL:   strings.TrimRight(baseURL, "/"),
+		token:     token,
+		userAgent: userAgent,
+		http:      &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
@@ -73,7 +78,7 @@ func (c *Client) do(method, path string, body, out any) error {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "magus-cli/dev")
+	req.Header.Set("User-Agent", c.userAgent)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
