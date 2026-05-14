@@ -1,17 +1,82 @@
 # magus
 
-The command-line interface for the Magus knowledge brain API.
+The command-line interface for the [Magus](https://magus.digital) knowledge-brain API.
 
-## Status
+## Install
 
-Pre-release. See [docs/QUICKSTART.md](docs/QUICKSTART.md) when available.
-
-## Build
-
+```sh
+curl -fsSL https://magus.digital/install.sh | sh
 ```
-make build
+
+Or via npm:
+
+```sh
+npm install -g @magus/cli
 ```
+
+Or build from source:
+
+```sh
+git clone https://github.com/wir-drei-digital/magus-cli
+cd magus-cli
+make install
+```
+
+## Quickstart
+
+Authorize this machine:
+
+```sh
+magus login
+```
+
+Browser opens; click Approve in the workspace you want this token scoped to.
+
+Create a brain and a page:
+
+```sh
+magus brain create "My Research"
+echo "# Notes\n\nFirst paragraph." | magus page write my-research "Today/Notes"
+```
+
+Search:
+
+```sh
+magus search "First paragraph" --brain my-research
+```
+
+See the full quickstart at [docs/QUICKSTART.md](docs/QUICKSTART.md).
+
+## Use with Claude Desktop / Cursor / Cline (MCP)
+
+Add to your `claude_desktop_config.json` (or equivalent):
+
+```json
+{
+  "mcpServers": {
+    "magus-brain": {
+      "command": "magus",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+The MCP server reads the active profile's token from `~/.config/magus/config.toml`.
+
+## Commands
+
+- `magus login [--token PAT]`: authorize
+- `magus profiles`, `magus profile use <name>`: switch workspaces
+- `magus brain list|create|show|archive`
+- `magus page list|show|write|rename|move|delete`
+- `magus search <query> --brain <id>`
+- `magus block add|edit|delete`
+- `magus link <source-block> <target> [--type relates_to]`
+- `magus mcp`: stdio MCP server
+
+Global flags: `--profile <name>`, `--json`, `--quiet`, `--no-color`.
 
 ## License
 
-MIT
+MIT.
