@@ -1,0 +1,48 @@
+version: 2
+project_name: magus
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: magus
+    main: ./cmd/magus
+    binary: magus
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+      - -X github.com/wir-drei-digital/magus-cli/internal/cli.Version={{.Version}}
+      - -X github.com/wir-drei-digital/magus-cli/internal/cli.Commit={{.Commit}}
+      - -X github.com/wir-drei-digital/magus-cli/internal/cli.BuildDate={{.Date}}
+
+archives:
+  - name_template: "magus_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^chore:"
+      - "^test:"

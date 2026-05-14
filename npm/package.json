@@ -1,0 +1,17 @@
+{
+  "name": "@magus/cli",
+  "version": "0.1.0",
+  "description": "Magus CLI - manage your knowledge brain from the terminal",
+  "bin": {
+    "magus": "./bin/magus"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "files": [
+    "install.js",
+    "bin/.gitkeep"
+  ],
+  "repository": "github:wir-drei-digital/magus-cli",
+  "license": "MIT"
+}
