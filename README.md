@@ -8,12 +8,6 @@ The command-line interface for the [Magus](https://magus.digital) knowledge-brai
 curl -fsSL https://magus.digital/install.sh | sh
 ```
 
-Or via npm:
-
-```sh
-npm install -g @magus/cli
-```
-
 Or build from source:
 
 ```sh
