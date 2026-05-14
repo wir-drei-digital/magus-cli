@@ -46,6 +46,7 @@ for use with Claude Desktop, Cursor, and other MCP-aware clients.`,
 		newSearchCmd(),
 		newBlockCmd(),
 		newLinkCmd(),
+		newMCPCmd(),
 	)
 	return cmd
 }
