@@ -58,6 +58,23 @@ Add to your `claude_desktop_config.json` (or equivalent):
 
 The MCP server reads the active profile's token from `~/.config/magus/config.toml`.
 
+## Use with Claude Code (and other agents)
+
+A skill file at [`skills/magus.md`](skills/magus.md) teaches agents like Claude Code, Codex, and other markdown-frontmatter skill loaders when and how to invoke this CLI. Install it once:
+
+```sh
+mkdir -p ~/.claude/skills
+curl -fsSL https://raw.githubusercontent.com/wir-drei-digital/magus-cli/main/skills/magus.md > ~/.claude/skills/magus.md
+```
+
+Or, if you have the repo cloned:
+
+```sh
+ln -s "$(pwd)/skills/magus.md" ~/.claude/skills/magus.md
+```
+
+The skill triggers when the user references their brain, notes, or knowledge base, and steers the agent to use the CLI for reads/writes/search instead of inventing answers from scratch.
+
 ## Commands
 
 - `magus login [--token PAT]`: authorize
