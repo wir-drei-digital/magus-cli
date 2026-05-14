@@ -60,20 +60,26 @@ The MCP server reads the active profile's token from `~/.config/magus/config.tom
 
 ## Use with Claude Code (and other agents)
 
-A skill file at [`skills/magus.md`](skills/magus.md) teaches agents like Claude Code, Codex, and other markdown-frontmatter skill loaders when and how to invoke this CLI. Install it once:
+A skill file at [`internal/skill/magus.md`](internal/skill/magus.md) teaches
+agents like Claude Code, Codex, and other markdown-frontmatter skill loaders
+when and how to invoke this CLI. Install it once:
 
 ```sh
-mkdir -p ~/.claude/skills
-curl -fsSL https://raw.githubusercontent.com/wir-drei-digital/magus-cli/main/skills/magus.md > ~/.claude/skills/magus.md
+magus skill install
 ```
 
-Or, if you have the repo cloned:
+By default this writes to `~/.claude/skills/magus.md`. For other agents:
 
 ```sh
-ln -s "$(pwd)/skills/magus.md" ~/.claude/skills/magus.md
+magus skill install --target codex       # ~/.codex/skills/magus.md
+magus skill install --path /custom/place # arbitrary path
+magus skill install --update             # overwrite existing
+magus skill show                         # print the skill to stdout
+magus skill uninstall                    # remove the installed file
 ```
 
-The skill triggers when the user references their brain, notes, or knowledge base, and steers the agent to use the CLI for reads/writes/search instead of inventing answers from scratch.
+The skill is embedded into the binary, so it updates atomically when you
+upgrade the CLI.
 
 ## Commands
 
