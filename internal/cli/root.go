@@ -4,6 +4,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const DefaultAPIURL = "https://magus.digital"
+
 var (
 	apiURL    string
 	profile   string
@@ -32,7 +34,14 @@ for use with Claude Desktop, Cursor, and other MCP-aware clients.`,
 	cmd.PersistentFlags().BoolVar(&quietMode, "quiet", false, "suppress non-error output")
 	cmd.PersistentFlags().BoolVar(&noColor, "no-color", false, "disable color output")
 
-	cmd.AddCommand(newVersionCmd())
+	cmd.AddCommand(
+		newVersionCmd(),
+		newLoginCmd(),
+		newLogoutCmd(),
+		newWhoamiCmd(),
+		newProfilesCmd(),
+		newProfileCmd(),
+	)
 	return cmd
 }
 
