@@ -8,6 +8,8 @@ The command-line interface for the [Magus](https://magus.digital) knowledge-brai
 curl -fsSL https://magus.digital/install.sh | sh
 ```
 
+Installs to `~/.magus/bin/magus` (no sudo). The installer adds the directory to your `PATH` via your shell's rc file. Override with `MAGUS_INSTALL_DIR=/usr/local/bin sh install.sh` if you want a system-wide install.
+
 Or build from source:
 
 ```sh
