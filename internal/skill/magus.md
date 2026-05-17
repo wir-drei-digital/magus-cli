@@ -43,40 +43,72 @@ To create a new brain:
 magus brain create "Project X"
 ```
 
-## Active brain (skip `--brain` on every command)
+## Register the active brain at session start
 
-Users can pin a workspace-default brain so subsequent page/search commands stop needing `--brain`:
+**This is the single most important habit.** Before you run more than one magus command in a session, register the brain you'll be working with:
 
 ```sh
-magus brain use project-x      # store as the active brain for the current profile
-magus brain current            # print it (non-zero exit if unset)
+magus brain use project-x
+```
+
+This pins it to the active profile so every subsequent command picks it up automatically. After that:
+
+- `magus page list` — no `--brain` needed
+- `magus search "query"` — no `--brain` needed
+- `magus page write "Notes/Today"` — one positional arg (title); brain comes from active
+- `magus page write "Title" --file notes.md` — same
+
+Inspect or clear:
+
+```sh
+magus brain current            # print the active brain (non-zero exit if unset)
 magus brain unset              # clear it
 ```
 
-Resolution rule everywhere a brain is needed:
+**Resolution rule** everywhere a brain is needed:
 
-1. Explicit `--brain` flag (or positional arg, for `page write`)
+1. Explicit `--brain` flag (or first positional arg for `page write`) wins
 2. The profile's active brain (from `magus brain use`)
 3. Error: `no brain specified ...`
 
-If you've inferred which brain the user means (e.g., from context or recent activity), invoke `magus brain use <slug>` once at the start of the session. After that:
+**When to call `magus brain use`:**
 
-- `magus page list` (no `--brain` needed)
-- `magus search "query"` (no `--brain` needed)
-- `magus page write "Notes/Today"` (one positional arg = title; brain comes from active)
+- The user names a brain explicitly: `magus brain use <their-slug>` immediately
+- The user only has one brain: `magus brain use` to the only one in `magus brain list --json`
+- The user references "my brain" without disambiguation and there are multiple: ask which one, then `magus brain use`
+- The user's prior session left an active brain (`magus brain current` returns something): trust it unless they ask to switch
+
+**Worked example.** User says "save these architecture notes":
+
+```sh
+magus brain current >/dev/null 2>&1 || magus brain use research   # set if unset
+cat <<'EOF' | magus page write "Architecture/2026-05-17"
+# Architecture decisions
+- ...
+EOF
+magus search "architecture" --limit 3 --json   # confirm it's findable
+```
+
+Notice no `--brain` after the initial `brain use`. That's the whole point.
 
 ## Save content to a page (the most common operation)
 
-The user just gave you research notes, a design decision, or observations. Save them:
+The user just gave you research notes, a design decision, or observations. Save them. With an active brain registered (see section above), drop `--brain`:
 
 ```sh
-cat <<'EOF' | magus page write project-x "Projects/Magus/API Design"
+cat <<'EOF' | magus page write "Projects/Magus/API Design"
 # API Design Decisions
 
 - Bearer token via PAT (32 random base62 chars, mgs_pat_ prefix)
 - One token = one workspace
 - Soft-delete pages, recover within 30 days
 EOF
+```
+
+Without an active brain, pass it explicitly as the first positional arg:
+
+```sh
+cat notes.md | magus page write project-x "Projects/Magus/API Design"
 ```
 
 Key behaviors:
@@ -88,10 +120,10 @@ Key behaviors:
 
 ## Search before generating
 
-When the user asks something where they may have prior notes, search the brain first:
+When the user asks something where they may have prior notes, search the brain first (active brain implicit; pass `--brain` only to override):
 
 ```sh
-magus search "rate limit strategy" --brain project-x --mode hybrid --limit 5 --json
+magus search "rate limit strategy" --mode hybrid --limit 5 --json
 ```
 
 Modes:
@@ -113,10 +145,10 @@ Use this when you need to quote or compare prior content before answering. The C
 ## Browse hierarchy
 
 ```sh
-magus page list --brain project-x --tree
+magus page list --tree
 ```
 
-`--tree` renders nested children. Omit `--tree` for a flat list.
+`--tree` renders nested children, omit for a flat list. With no active brain set, pass `--brain <id-or-slug>`.
 
 ## Surgical edits
 
