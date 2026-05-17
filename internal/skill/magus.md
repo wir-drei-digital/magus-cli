@@ -165,6 +165,9 @@ magus profiles, magus profile use <name>
 magus login [--token PAT], magus logout, magus whoami
 magus mcp
 magus version
+magus update [--check] [--force]
 ```
+
+If the CLI reports it can't reach a feature or behaves oddly, suggest `magus update` to pull the latest release before debugging further.
 
 Global flags: `--profile <name>`, `--json`, `--quiet`. Run `magus <cmd> --help` for any subcommand's flags.

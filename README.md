@@ -94,8 +94,9 @@ upgrade the CLI.
 - `magus block add|edit|delete`
 - `magus link <source-block> <target> [--type relates_to]`
 - `magus mcp`: stdio MCP server
+- `magus update [--check] [--force]`: self-update to the latest GitHub release
 
-Global flags: `--profile <name>`, `--json`, `--quiet`, `--no-color`.
+Global flags: `--profile <name>`, `--json`, `--quiet`.
 
 ## License
 
