@@ -59,6 +59,60 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestActiveBrainRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{
+		DefaultProfile: "work",
+		Profiles: map[string]Profile{
+			"work": {
+				APIURL:      "https://magus.digital",
+				Token:       "tok",
+				ActiveBrain: "research",
+			},
+		},
+	}
+	if err := cfg.saveTo(dir); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	loaded, err := loadFrom(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := loaded.Profiles["work"].ActiveBrain; got != "research" {
+		t.Errorf("active_brain round-trip failed: got %q", got)
+	}
+}
+
+func TestResolveActiveBrain(t *testing.T) {
+	cfg := &Config{
+		DefaultProfile: "work",
+		Profiles: map[string]Profile{
+			"work": {APIURL: "https://magus.digital", Token: "tok", ActiveBrain: "research"},
+		},
+	}
+
+	// Override wins over profile value
+	if got := ResolveActiveBrain(cfg, "explicit"); got != "explicit" {
+		t.Errorf("override should win: got %q", got)
+	}
+
+	// Falls back to profile value
+	if got := ResolveActiveBrain(cfg, ""); got != "research" {
+		t.Errorf("profile fallback failed: got %q", got)
+	}
+
+	// Empty when neither set
+	empty := &Config{Profiles: map[string]Profile{}}
+	if got := ResolveActiveBrain(empty, ""); got != "" {
+		t.Errorf("expected empty result, got %q", got)
+	}
+
+	// Nil config safe
+	if got := ResolveActiveBrain(nil, ""); got != "" {
+		t.Errorf("expected empty result for nil cfg, got %q", got)
+	}
+}
+
 func TestActiveProfileResolution(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{

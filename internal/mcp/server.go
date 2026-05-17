@@ -9,7 +9,9 @@ import (
 )
 
 // Serve runs the MCP stdio server, registering all brain tools.
-func Serve(_ context.Context, client *api.Client, version string) error {
+// activeBrain is used as a fallback for tools that take an optional brain
+// argument (currently brain_search). Pass "" if no active brain is configured.
+func Serve(_ context.Context, client *api.Client, version, activeBrain string) error {
 	if version == "" {
 		version = "dev"
 	}
@@ -19,7 +21,7 @@ func Serve(_ context.Context, client *api.Client, version string) error {
 		server.WithToolCapabilities(true),
 	)
 
-	for _, tool := range tools(client) {
+	for _, tool := range tools(client, activeBrain) {
 		s.AddTool(tool.def, tool.handler)
 	}
 

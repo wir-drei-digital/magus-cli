@@ -9,7 +9,7 @@ import (
 	"github.com/wir-drei-digital/magus-cli/internal/api"
 )
 
-func tools(c *api.Client) []registeredTool {
+func tools(c *api.Client, activeBrain string) []registeredTool {
 	return []registeredTool{
 		{
 			def: mcpgo.NewTool("brain_list",
@@ -165,7 +165,10 @@ func tools(c *api.Client) []registeredTool {
 				}
 				brain := stringArg(req, "brain")
 				if brain == "" {
-					return nil, fmt.Errorf("brain is required for search (default-brain resolution not yet implemented)")
+					brain = activeBrain
+				}
+				if brain == "" {
+					return nil, fmt.Errorf("no brain specified (pass brain arg or run `magus brain use <id>`)")
 				}
 				input := api.SearchInput{
 					Query: query,

@@ -14,7 +14,15 @@ func newBrainCmd() *cobra.Command {
 		Use:   "brain",
 		Short: "Manage brains",
 	}
-	cmd.AddCommand(brainListCmd(), brainCreateCmd(), brainShowCmd(), brainArchiveCmd())
+	cmd.AddCommand(
+		brainListCmd(),
+		brainCreateCmd(),
+		brainShowCmd(),
+		brainArchiveCmd(),
+		brainUseCmd(),
+		brainCurrentCmd(),
+		brainUnsetCmd(),
+	)
 	return cmd
 }
 
@@ -125,6 +133,102 @@ func brainArchiveCmd() *cobra.Command {
 				return err
 			}
 			output.Println(quietMode, "Archived.")
+			return nil
+		},
+	}
+}
+
+// activeProfileName resolves the name of the profile to mutate for active-brain
+// commands. It honours the global --profile override, otherwise defaults to
+// cfg.DefaultProfile. Returns "" if no profile is configured.
+func activeProfileName(cfg *config.Config) string {
+	if profile != "" {
+		return profile
+	}
+	return cfg.DefaultProfile
+}
+
+func brainUseCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "use <id-or-slug>",
+		Short: "Set the active brain for this profile",
+		Long: `Stores <id-or-slug> as the active brain for the current profile so that
+subsequent commands (page list, search, page write) don't need --brain.
+
+Resolution order everywhere:
+  1. explicit --brain flag (or positional arg)
+  2. the profile's active brain
+  3. error`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			name := activeProfileName(cfg)
+			if name == "" {
+				return fmt.Errorf("no profile configured (run `magus login`)")
+			}
+			p, ok := cfg.Profiles[name]
+			if !ok {
+				return fmt.Errorf("profile %q not found", name)
+			}
+			p.ActiveBrain = args[0]
+			cfg.Profiles[name] = p
+			if err := cfg.Save(); err != nil {
+				return err
+			}
+			output.Println(quietMode, fmt.Sprintf("Active brain set to %q for profile %q.", args[0], name))
+			return nil
+		},
+	}
+}
+
+func brainCurrentCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "current",
+		Short: "Print the active brain for the current profile",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			p, ok := cfg.Active(profile)
+			if !ok || p.ActiveBrain == "" {
+				// Empty stdout, error to stderr + non-zero exit (via main.go).
+				return fmt.Errorf("no active brain")
+			}
+			fmt.Println(p.ActiveBrain)
+			return nil
+		},
+	}
+}
+
+func brainUnsetCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "unset",
+		Short: "Clear the active brain for the current profile",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			name := activeProfileName(cfg)
+			if name == "" {
+				return fmt.Errorf("no profile configured (run `magus login`)")
+			}
+			p, ok := cfg.Profiles[name]
+			if !ok {
+				return fmt.Errorf("profile %q not found", name)
+			}
+			p.ActiveBrain = ""
+			cfg.Profiles[name] = p
+			if err := cfg.Save(); err != nil {
+				return err
+			}
+			output.Println(quietMode, fmt.Sprintf("Cleared active brain for profile %q.", name))
 			return nil
 		},
 	}

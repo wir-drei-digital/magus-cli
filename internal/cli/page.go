@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/wir-drei-digital/magus-cli/internal/api"
+	"github.com/wir-drei-digital/magus-cli/internal/config"
 	"github.com/wir-drei-digital/magus-cli/internal/output"
 )
 
@@ -24,12 +25,23 @@ func newPageCmd() *cobra.Command {
 }
 
 func pageListCmd() *cobra.Command {
-	var brainID string
+	var brainFlag string
 	var tree bool
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List pages",
+		Long: `List pages in a brain.
+
+If --brain is omitted the active brain (set via 'magus brain use <id>') is used.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			brainID := config.ResolveActiveBrain(cfg, brainFlag)
+			if brainID == "" {
+				return fmt.Errorf("no brain specified (use --brain <id> or `magus brain use <id>`)")
+			}
 			c, err := loadClient()
 			if err != nil {
 				return err
@@ -47,9 +59,8 @@ func pageListCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&brainID, "brain", "", "brain id or slug")
+	cmd.Flags().StringVar(&brainFlag, "brain", "", "brain id or slug (defaults to active brain)")
 	cmd.Flags().BoolVar(&tree, "tree", false, "render tree-shaped output")
-	_ = cmd.MarkFlagRequired("brain")
 	return cmd
 }
 
@@ -99,13 +110,34 @@ func pageShowCmd() *cobra.Command {
 func pageWriteCmd() *cobra.Command {
 	var file, mode, parent string
 	cmd := &cobra.Command{
-		Use:   "write <brain> <title>",
-		Args:  cobra.ExactArgs(2),
+		Use:   "write [brain] <title>",
+		Args:  cobra.RangeArgs(1, 2),
 		Short: "Create or append to a page (reads markdown from stdin or --file)",
 		Long: `Title supports slash-paths like "Projects/Magus/API" to auto-create
 ancestor pages. Markdown content is read from --file or from stdin if
---file is omitted.`,
+--file is omitted.
+
+If only one positional arg is given it is treated as the title and the
+brain is taken from the active brain (set via 'magus brain use <id>').
+With two positional args the first is the brain id-or-slug.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			var brainID, title string
+			if len(args) == 2 {
+				brainID = args[0]
+				title = args[1]
+			} else {
+				title = args[0]
+			}
+			if brainID == "" {
+				cfg, err := config.Load()
+				if err != nil {
+					return err
+				}
+				brainID = config.ResolveActiveBrain(cfg, "")
+			}
+			if brainID == "" {
+				return fmt.Errorf("no brain specified (pass <brain> or run `magus brain use <id>`)")
+			}
 			c, err := loadClient()
 			if err != nil {
 				return err
@@ -114,8 +146,8 @@ ancestor pages. Markdown content is read from --file or from stdin if
 			if err != nil {
 				return err
 			}
-			page, err := c.WritePage(args[0], api.WritePageInput{
-				Title:        args[1],
+			page, err := c.WritePage(brainID, api.WritePageInput{
+				Title:        title,
 				Content:      content,
 				ParentPageID: parent,
 				Mode:         mode,

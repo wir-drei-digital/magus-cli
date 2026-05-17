@@ -43,6 +43,28 @@ To create a new brain:
 magus brain create "Project X"
 ```
 
+## Active brain (skip `--brain` on every command)
+
+Users can pin a workspace-default brain so subsequent page/search commands stop needing `--brain`:
+
+```sh
+magus brain use project-x      # store as the active brain for the current profile
+magus brain current            # print it (non-zero exit if unset)
+magus brain unset              # clear it
+```
+
+Resolution rule everywhere a brain is needed:
+
+1. Explicit `--brain` flag (or positional arg, for `page write`)
+2. The profile's active brain (from `magus brain use`)
+3. Error: `no brain specified ...`
+
+If you've inferred which brain the user means (e.g., from context or recent activity), invoke `magus brain use <slug>` once at the start of the session. After that:
+
+- `magus page list` (no `--brain` needed)
+- `magus search "query"` (no `--brain` needed)
+- `magus page write "Notes/Today"` (one positional arg = title; brain comes from active)
+
 ## Save content to a page (the most common operation)
 
 The user just gave you research notes, a design decision, or observations. Save them:
@@ -134,8 +156,9 @@ If the user has configured the MCP server in their Claude Desktop / Cursor / Cli
 
 ```
 magus brain list|create|show|archive
-magus page list|show|write|rename|move|delete
-magus search <query> --brain <id-or-slug>
+magus brain use <id-or-slug>|current|unset
+magus page list [--brain <id>]|show|write [brain] <title>|rename|move|delete
+magus search <query> [--brain <id-or-slug>]
 magus block add|edit|delete
 magus link <source-block> <target> [--type relates_to]
 magus profiles, magus profile use <name>

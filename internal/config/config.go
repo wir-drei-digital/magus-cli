@@ -22,6 +22,7 @@ type Profile struct {
 	UserEmail   string `toml:"user_email,omitempty"`
 	Scope       string `toml:"scope,omitempty"`
 	Token       string `toml:"token"`
+	ActiveBrain string `toml:"active_brain,omitempty"`
 }
 
 // Config is the root of the on-disk TOML file.

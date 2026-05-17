@@ -88,8 +88,9 @@ upgrade the CLI.
 - `magus login [--token PAT]`: authorize
 - `magus profiles`, `magus profile use <name>`: switch workspaces
 - `magus brain list|create|show|archive`
+- `magus brain use|current|unset`: pin a default brain so other commands can drop `--brain`
 - `magus page list|show|write|rename|move|delete`
-- `magus search <query> --brain <id>`
+- `magus search <query> [--brain <id>]`
 - `magus block add|edit|delete`
 - `magus link <source-block> <target> [--type relates_to]`
 - `magus mcp`: stdio MCP server

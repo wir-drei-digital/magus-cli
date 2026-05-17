@@ -25,3 +25,19 @@ func ResolveAPIURL(cfg *Config, profileOverride string, fallback string) string 
 	}
 	return fallback
 }
+
+// ResolveActiveBrain returns the brain id-or-slug to use. The override (e.g.
+// a --brain flag value or positional arg) wins; otherwise it falls back to
+// the active profile's stored ActiveBrain. Returns "" if neither is set.
+func ResolveActiveBrain(cfg *Config, override string) string {
+	if override != "" {
+		return override
+	}
+	if cfg == nil {
+		return ""
+	}
+	if p, ok := cfg.Active(""); ok {
+		return p.ActiveBrain
+	}
+	return ""
+}

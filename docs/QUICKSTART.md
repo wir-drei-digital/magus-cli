@@ -18,6 +18,18 @@ magus login --name acme
 magus profile use acme
 ```
 
+## Pin an active brain (optional)
+
+If you mostly work in one brain, set it as the active brain so commands stop needing `--brain`:
+
+```sh
+magus brain use my-brain     # store as active for the current profile
+magus brain current          # print the active brain (non-zero exit if unset)
+magus brain unset            # clear it
+```
+
+Resolution everywhere: explicit `--brain` flag (or positional arg) wins; otherwise the active brain is used; otherwise the command errors. With an active brain set, `magus page list`, `magus search ...`, and `magus page write "Notes/Today"` (single positional arg = title) all work without `--brain`.
+
 ## Write a page from markdown
 
 From stdin:
