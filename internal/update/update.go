@@ -364,28 +364,39 @@ func ResolveBinaryPath() (string, error) {
 	return real, nil
 }
 
-// AtomicReplace writes newBinary to <currentBinary>.new in the same
-// directory and renames it over currentBinary. On Unix this is rename(2),
-// which atomically replaces the dest entry; the running process keeps
-// its open file handle for the old inode, so the running command keeps
-// executing fine.
+// AtomicReplace writes newBinary into a uniquely-named staging file in
+// currentBinary's directory and renames it over currentBinary. On Unix
+// this is rename(2), which atomically replaces the dest entry; the
+// running process keeps its open file handle for the old inode, so the
+// running command keeps executing fine.
+//
+// Concurrent calls against the same target are safe because each call
+// stages to its own os.CreateTemp file; the last successful Rename wins.
+// The staging file is removed on every exit path (defer); after a
+// successful Rename the file is no longer at the staging path, so the
+// deferred Remove is a harmless no-op.
 //
 // Windows is rejected at a higher layer; this function would also fail
 // there because rename can't replace a file that is open for execute.
 func AtomicReplace(currentBinary, newBinary string) error {
-	target := currentBinary + ".new"
-	// Move (or copy) the new file into the same directory so rename is
-	// guaranteed to stay on one filesystem.
-	if err := moveOrCopy(newBinary, target); err != nil {
+	dir := filepath.Dir(currentBinary)
+	f, err := os.CreateTemp(dir, "magus-update-*.tmp")
+	if err != nil {
 		return err
 	}
-	if err := os.Chmod(target, 0o755); err != nil {
-		_ = os.Remove(target)
+	staging := f.Name()
+	// We only needed the unique name; reopen via moveOrCopy below.
+	_ = f.Close()
+	defer os.Remove(staging)
+
+	if err := moveOrCopy(newBinary, staging); err != nil {
 		return err
 	}
-	if err := os.Rename(target, currentBinary); err != nil {
-		_ = os.Remove(target)
-		return fmt.Errorf("rename %s -> %s: %w", target, currentBinary, err)
+	if err := os.Chmod(staging, 0o755); err != nil {
+		return err
+	}
+	if err := os.Rename(staging, currentBinary); err != nil {
+		return fmt.Errorf("rename %s -> %s: %w", staging, currentBinary, err)
 	}
 	return nil
 }
@@ -523,18 +534,26 @@ func (c *Client) Run(currentVersion string, opts Options) (*Result, error) {
 	}
 
 	// Place the staging file in the destination directory so rename is
-	// guaranteed to be on the same filesystem.
+	// guaranteed to be on the same filesystem. Use CreateTemp for a
+	// unique name so concurrent updates don't clobber each other and
+	// orphaned tmp files (from a SIGINT between Chmod and Rename) are
+	// cleaned up via defer.
 	stagingDir := filepath.Dir(binPath)
-	staging := filepath.Join(stagingDir, "magus.update.tmp")
+	stagingFile, err := os.CreateTemp(stagingDir, "magus-update-*.tmp")
+	if err != nil {
+		return nil, err
+	}
+	staging := stagingFile.Name()
+	_ = stagingFile.Close()
+	defer os.Remove(staging)
+
 	if err := moveOrCopy(newBin, staging); err != nil {
 		return nil, err
 	}
 	if err := os.Chmod(staging, 0o755); err != nil {
-		_ = os.Remove(staging)
 		return nil, err
 	}
 	if err := os.Rename(staging, binPath); err != nil {
-		_ = os.Remove(staging)
 		return nil, fmt.Errorf("atomic replace failed: %w", err)
 	}
 

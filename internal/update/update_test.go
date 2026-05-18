@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -312,6 +313,63 @@ func TestAtomicReplace(t *testing.T) {
 	}
 	if string(got) != "NEW" {
 		t.Errorf("got %q, want %q", got, "NEW")
+	}
+	// No orphan staging files should remain in dir.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "magus-update-") {
+			t.Errorf("orphan staging file: %s", e.Name())
+		}
+	}
+}
+
+// TestAtomicReplaceConcurrent runs two concurrent replacements against
+// the same target. With the unique-staging-name fix both calls succeed
+// (the second-to-rename wins); without the fix, one would clobber the
+// other's staging file mid-rename and return an error.
+func TestAtomicReplaceConcurrent(t *testing.T) {
+	dir := t.TempDir()
+	current := filepath.Join(dir, "magus")
+	if err := os.WriteFile(current, []byte("OLD"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	srcA := filepath.Join(dir, "src-a")
+	srcB := filepath.Join(dir, "src-b")
+	if err := os.WriteFile(srcA, []byte("AAA"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(srcB, []byte("BBB"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	errs := make(chan error, 2)
+	go func() { errs <- AtomicReplace(current, srcA) }()
+	go func() { errs <- AtomicReplace(current, srcB) }()
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err != nil {
+			t.Errorf("concurrent AtomicReplace failed: %v", err)
+		}
+	}
+
+	final, err := os.ReadFile(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := string(final); s != "AAA" && s != "BBB" {
+		t.Errorf("unexpected final content: %q", s)
+	}
+	// Both staging files should be cleaned up by defer.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "magus-update-") {
+			t.Errorf("orphan staging file: %s", e.Name())
+		}
 	}
 }
 
