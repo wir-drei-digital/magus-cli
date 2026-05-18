@@ -20,6 +20,7 @@ func newPageCmd() *cobra.Command {
 		pageRenameCmd(),
 		pageMoveCmd(),
 		pageDeleteCmd(),
+		pageClearCmd(),
 	)
 	return cmd
 }
@@ -112,10 +113,10 @@ func pageShowCmd() *cobra.Command {
 }
 
 func pageWriteCmd() *cobra.Command {
-	var file, mode, parent string
+	var file, mode, parent, pageRef string
 	cmd := &cobra.Command{
-		Use:   "write [brain] <title>",
-		Args:  cobra.RangeArgs(1, 2),
+		Use:   "write [brain] [title]",
+		Args:  cobra.RangeArgs(0, 2),
 		Short: "Create or append to a page (reads markdown from stdin or --file)",
 		Long: `Title supports slash-paths like "Projects/Magus/API" to auto-create
 ancestor pages. Markdown content is read from --file or from stdin if
@@ -123,39 +124,76 @@ ancestor pages. Markdown content is read from --file or from stdin if
 
 If only one positional arg is given it is treated as the title and the
 brain is taken from the active brain (set via 'magus brain use <id>').
-With two positional args the first is the brain id-or-slug.`,
+With two positional args the first is the brain id-or-slug.
+
+Use --page <id|slug|brain/slug> to target an existing page directly. When
+--page is set, the title positional becomes optional (provide it only to
+rename the page during the write).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var brainID, title string
-			if len(args) == 2 {
-				brainID = args[0]
-				title = args[1]
-			} else {
-				title = args[0]
-			}
-			if brainID == "" {
-				cfg, err := config.Load()
-				if err != nil {
-					return err
+
+			if pageRef != "" {
+				// --page mode: title is optional, brain comes from the resolved page.
+				if len(args) == 2 {
+					title = args[1]
+				} else if len(args) == 1 {
+					title = args[0]
 				}
-				brainID = config.ResolveActiveBrain(cfg, "")
+			} else {
+				if len(args) == 0 {
+					return fmt.Errorf("title is required (or pass --page <ref> to target an existing page)")
+				}
+				if len(args) == 2 {
+					brainID = args[0]
+					title = args[1]
+				} else {
+					title = args[0]
+				}
+				if brainID == "" {
+					cfg, err := config.Load()
+					if err != nil {
+						return err
+					}
+					brainID = config.ResolveActiveBrain(cfg, "")
+				}
+				if brainID == "" {
+					return fmt.Errorf("no brain specified (pass <brain> or run `magus brain use <id>`)")
+				}
 			}
-			if brainID == "" {
-				return fmt.Errorf("no brain specified (pass <brain> or run `magus brain use <id>`)")
-			}
+
 			c, err := loadClient()
 			if err != nil {
 				return err
 			}
+
+			input := api.WritePageInput{
+				Title:        title,
+				ParentPageID: parent,
+				Mode:         mode,
+			}
+
+			if pageRef != "" {
+				pageID, err := resolvePage(cmd.Context(), c, pageRef)
+				if err != nil {
+					return err
+				}
+				input.PageID = pageID
+
+				// Look up the page to find its brain (needed for the write endpoint).
+				page, err := c.GetPage(cmd.Context(), pageID, "")
+				if err != nil {
+					return err
+				}
+				brainID = page.BrainID
+			}
+
 			content, err := readContent(file)
 			if err != nil {
 				return err
 			}
-			page, err := c.WritePage(cmd.Context(), brainID, api.WritePageInput{
-				Title:        title,
-				Content:      content,
-				ParentPageID: parent,
-				Mode:         mode,
-			})
+			input.Content = content
+
+			page, err := c.WritePage(cmd.Context(), brainID, input)
 			if err != nil {
 				return err
 			}
@@ -169,7 +207,48 @@ With two positional args the first is the brain id-or-slug.`,
 	cmd.Flags().StringVar(&file, "file", "", "markdown file path; defaults to stdin")
 	cmd.Flags().StringVar(&mode, "mode", "", "append (default) | create_only | replace")
 	cmd.Flags().StringVar(&parent, "parent", "", "parent page id")
+	cmd.Flags().StringVar(&pageRef, "page", "", "target a specific page by id/slug/brain-slug (replaces title-based resolution)")
 	return cmd
+}
+
+func pageClearCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "clear <id|slug|brain/slug>",
+		Args:  cobra.ExactArgs(1),
+		Short: "Remove all blocks from a page (the page itself is kept)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := loadClient()
+			if err != nil {
+				return err
+			}
+
+			pageID, err := resolvePage(cmd.Context(), c, args[0])
+			if err != nil {
+				return err
+			}
+
+			// Clear by writing replace + empty content against page_id.
+			page, err := c.GetPage(cmd.Context(), pageID, "")
+			if err != nil {
+				return err
+			}
+
+			res, err := c.WritePage(cmd.Context(), page.BrainID, api.WritePageInput{
+				PageID:  pageID,
+				Content: "",
+				Mode:    "replace",
+			})
+			if err != nil {
+				return err
+			}
+
+			if jsonMode {
+				return output.JSON(res)
+			}
+			fmt.Printf("Cleared blocks on %q\n", res.Title)
+			return nil
+		},
+	}
 }
 
 func readContent(file string) (string, error) {
