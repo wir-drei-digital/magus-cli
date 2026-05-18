@@ -1,0 +1,22 @@
+{
+  "name": "wir-drei-digital",
+  "owner": {
+    "name": "wir drei digital"
+  },
+  "metadata": {
+    "description": "Magus knowledge brain CLI plugin for Claude Code",
+    "version": "0.2.1"
+  },
+  "pluginRoot": "./plugins",
+  "plugins": [
+    {
+      "name": "magus",
+      "source": "./plugins/magus",
+      "description": "Lets Claude Code save, search, and recall content from the user's Magus knowledge brain via the magus CLI binary (https://github.com/wir-drei-digital/magus-cli).",
+      "keywords": ["brain", "notes", "knowledge", "second-brain", "memory"],
+      "repository": "https://github.com/wir-drei-digital/magus-cli",
+      "license": "MIT",
+      "homepage": "https://github.com/wir-drei-digital/magus-cli"
+    }
+  ]
+}

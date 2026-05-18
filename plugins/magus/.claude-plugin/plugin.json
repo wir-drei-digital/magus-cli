@@ -1,0 +1,12 @@
+{
+  "name": "magus",
+  "version": "0.2.1",
+  "description": "Magus knowledge brain CLI plugin. Provides the `magus` skill so Claude Code knows when and how to call the magus CLI binary to read, write, and search the user's brain.",
+  "author": {
+    "name": "wir drei digital"
+  },
+  "repository": "https://github.com/wir-drei-digital/magus-cli",
+  "homepage": "https://github.com/wir-drei-digital/magus-cli",
+  "license": "MIT",
+  "keywords": ["brain", "notes", "knowledge", "second-brain", "memory"]
+}
