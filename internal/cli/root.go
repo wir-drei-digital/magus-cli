@@ -34,22 +34,36 @@ for use with Claude Desktop, Cursor, and other MCP-aware clients.`,
 	cmd.PersistentFlags().BoolVar(&jsonMode, "json", false, "machine-readable JSON output")
 	cmd.PersistentFlags().BoolVar(&quietMode, "quiet", false, "suppress non-error output")
 
-	cmd.AddCommand(
-		newVersionCmd(),
-		newLoginCmd(),
-		newLogoutCmd(),
-		newWhoamiCmd(),
-		newProfilesCmd(),
-		newProfileCmd(),
-		newBrainCmd(),
-		newPageCmd(),
-		newSearchCmd(),
-		newBlockCmd(),
-		newLinkCmd(),
-		newMCPCmd(),
-		newSkillCmd(),
-		newUpdateCmd(),
+	cmd.AddGroup(
+		&cobra.Group{ID: "data", Title: "Knowledge operations:"},
+		&cobra.Group{ID: "auth", Title: "Authentication:"},
+		&cobra.Group{ID: "agent", Title: "Agent integration:"},
+		&cobra.Group{ID: "system", Title: "System:"},
 	)
+
+	addInGroup := func(group string, sub *cobra.Command) {
+		sub.GroupID = group
+		cmd.AddCommand(sub)
+	}
+
+	addInGroup("auth", newLoginCmd())
+	addInGroup("auth", newLogoutCmd())
+	addInGroup("auth", newWhoamiCmd())
+	addInGroup("auth", newProfilesCmd())
+	addInGroup("auth", newProfileCmd())
+
+	addInGroup("data", newBrainCmd())
+	addInGroup("data", newPageCmd())
+	addInGroup("data", newBlockCmd())
+	addInGroup("data", newSearchCmd())
+	addInGroup("data", newLinkCmd())
+
+	addInGroup("agent", newMCPCmd())
+	addInGroup("agent", newSkillCmd())
+
+	addInGroup("system", newVersionCmd())
+	addInGroup("system", newUpdateCmd())
+
 	return cmd
 }
 
