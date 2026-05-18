@@ -76,7 +76,7 @@ func collect(rows *[][]string, pages []api.Page, indent string) {
 func pageShowCmd() *cobra.Command {
 	var format string
 	cmd := &cobra.Command{
-		Use:   "show <id>",
+		Use:   "show <id|slug|brain/slug>",
 		Args:  cobra.ExactArgs(1),
 		Short: "Show a page",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -84,7 +84,11 @@ func pageShowCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			page, err := c.GetPage(cmd.Context(), args[0], format)
+			pageID, err := resolvePage(cmd.Context(), c, args[0])
+			if err != nil {
+				return err
+			}
+			page, err := c.GetPage(cmd.Context(), pageID, format)
 			if err != nil {
 				return err
 			}
@@ -189,7 +193,7 @@ func readContent(file string) (string, error) {
 
 func pageRenameCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "rename <id> <title>",
+		Use:   "rename <id|slug|brain/slug> <title>",
 		Args:  cobra.ExactArgs(2),
 		Short: "Rename a page",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -197,8 +201,12 @@ func pageRenameCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			pageID, err := resolvePage(cmd.Context(), c, args[0])
+			if err != nil {
+				return err
+			}
 			title := args[1]
-			p, err := c.UpdatePage(cmd.Context(), args[0], api.UpdatePageInput{Title: &title})
+			p, err := c.UpdatePage(cmd.Context(), pageID, api.UpdatePageInput{Title: &title})
 			if err != nil {
 				return err
 			}
@@ -214,7 +222,7 @@ func pageRenameCmd() *cobra.Command {
 func pageMoveCmd() *cobra.Command {
 	var parent string
 	cmd := &cobra.Command{
-		Use:   "move <id>",
+		Use:   "move <id|slug|brain/slug>",
 		Args:  cobra.ExactArgs(1),
 		Short: "Move a page under another parent (or 'none' to move to root)",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -231,7 +239,11 @@ func pageMoveCmd() *cobra.Command {
 			} else {
 				return fmt.Errorf("--parent is required (use 'none' to move to root)")
 			}
-			p, err := c.UpdatePage(cmd.Context(), args[0], api.UpdatePageInput{ParentPageID: parentPtr})
+			pageID, err := resolvePage(cmd.Context(), c, args[0])
+			if err != nil {
+				return err
+			}
+			p, err := c.UpdatePage(cmd.Context(), pageID, api.UpdatePageInput{ParentPageID: parentPtr})
 			if err != nil {
 				return err
 			}
@@ -248,7 +260,7 @@ func pageMoveCmd() *cobra.Command {
 
 func pageDeleteCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "delete <id>",
+		Use:   "delete <id|slug|brain/slug>",
 		Args:  cobra.ExactArgs(1),
 		Short: "Soft-delete a page",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -256,7 +268,11 @@ func pageDeleteCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			res, err := c.DeletePage(cmd.Context(), args[0])
+			pageID, err := resolvePage(cmd.Context(), c, args[0])
+			if err != nil {
+				return err
+			}
+			res, err := c.DeletePage(cmd.Context(), pageID)
 			if err != nil {
 				return err
 			}

@@ -18,7 +18,7 @@ func blockAddCmd() *cobra.Command {
 	var text, blockType, language string
 	var level int
 	cmd := &cobra.Command{
-		Use:   "add <page-id>",
+		Use:   "add <page-id|slug|brain/slug>",
 		Args:  cobra.ExactArgs(1),
 		Short: "Add a block to a page",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -26,7 +26,11 @@ func blockAddCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			b, err := c.AddBlock(cmd.Context(), args[0], api.AddBlockInput{
+			pageID, err := resolvePage(cmd.Context(), c, args[0])
+			if err != nil {
+				return err
+			}
+			b, err := c.AddBlock(cmd.Context(), pageID, api.AddBlockInput{
 				Type: blockType, Text: text, Level: level, Language: language,
 			})
 			if err != nil {

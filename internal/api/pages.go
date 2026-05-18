@@ -34,10 +34,11 @@ func (c *Client) ListPages(ctx context.Context, brainID string, asFlat bool) ([]
 }
 
 type WritePageInput struct {
-	Title        string `json:"title"`
+	Title        string `json:"title,omitempty"`
 	Content      string `json:"content,omitempty"`
 	ParentPageID string `json:"parent_page_id,omitempty"`
 	Mode         string `json:"mode,omitempty"`
+	PageID       string `json:"page_id,omitempty"`
 }
 
 func (c *Client) WritePage(ctx context.Context, brainID string, input WritePageInput) (*Page, error) {
@@ -55,6 +56,17 @@ func (c *Client) GetPage(ctx context.Context, pageID, format string) (*Page, err
 	}
 	var out Page
 	if err := c.GetQuery(ctx, fmt.Sprintf("/api/v2/pages/%s", url.PathEscape(pageID)), q, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetPageBySlug resolves a page by its slug within a brain. brainIDOrSlug can be
+// either a brain UUID or slug; slug is the page slug.
+func (c *Client) GetPageBySlug(ctx context.Context, brainIDOrSlug, slug string) (*Page, error) {
+	var out Page
+	path := fmt.Sprintf("/api/v2/brains/%s/pages/%s", url.PathEscape(brainIDOrSlug), url.PathEscape(slug))
+	if err := c.Get(ctx, path, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
