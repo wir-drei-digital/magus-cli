@@ -6,7 +6,7 @@
 # to override (e.g., MAGUS_INSTALL_DIR=/usr/local/bin sh install.sh —
 # you'll need write permission to whatever path you choose).
 
-set -e
+set -eu
 
 REPO="wir-drei-digital/magus-cli"
 INSTALL_DIR="${MAGUS_INSTALL_DIR:-$HOME/.magus/bin}"
@@ -38,6 +38,25 @@ URL="https://github.com/$REPO/releases/download/$LATEST/$ARCHIVE"
 
 echo "Downloading $ARCHIVE..."
 curl -fsSL -o "$TMP/$ARCHIVE" "$URL"
+
+echo "Verifying checksum..."
+curl -fsSL -o "$TMP/checksums.txt" \
+  "https://github.com/$REPO/releases/download/$LATEST/checksums.txt"
+EXPECTED=$(grep " $ARCHIVE\$" "$TMP/checksums.txt" | awk '{print $1}')
+[ -n "$EXPECTED" ] || { echo "checksum not found for $ARCHIVE" >&2; exit 1; }
+if command -v sha256sum >/dev/null 2>&1; then
+  ACTUAL=$(sha256sum "$TMP/$ARCHIVE" | awk '{print $1}')
+elif command -v shasum >/dev/null 2>&1; then
+  ACTUAL=$(shasum -a 256 "$TMP/$ARCHIVE" | awk '{print $1}')
+else
+  echo "Neither sha256sum nor shasum found; cannot verify checksum" >&2
+  exit 1
+fi
+[ "$EXPECTED" = "$ACTUAL" ] || {
+  echo "checksum mismatch: expected $EXPECTED, got $ACTUAL" >&2
+  exit 1
+}
+
 tar -xzf "$TMP/$ARCHIVE" -C "$TMP"
 
 mkdir -p "$INSTALL_DIR"
@@ -70,7 +89,7 @@ if [ "$INSTALL_DIR" = "$DEFAULT_DIR" ]; then
         ADD_LINE='set -gx PATH $HOME/.magus/bin $PATH'
       fi
 
-      if [ -n "$RC" ] && [ -f "$RC" ] && ! grep -qs '/.magus/bin' "$RC"; then
+      if [ -n "$RC" ] && [ -f "$RC" ] && ! grep -qsE '^[^#]*PATH=.*\.magus/bin' "$RC"; then
         printf '\n# Added by magus installer\n%s\n' "$ADD_LINE" >> "$RC"
         echo "Added $DEFAULT_DIR to PATH in $RC"
         echo "Run 'exec \$SHELL' or open a new terminal, then 'magus login'"
