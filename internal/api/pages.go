@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 )
@@ -20,13 +21,13 @@ type Page struct {
 	DeletedAt    string  `json:"deleted_at,omitempty"`
 }
 
-func (c *Client) ListPages(brainID string, asFlat bool) ([]Page, error) {
+func (c *Client) ListPages(ctx context.Context, brainID string, asFlat bool) ([]Page, error) {
 	q := url.Values{}
 	if asFlat {
 		q.Set("as", "flat")
 	}
 	var out []Page
-	if err := c.GetQuery(fmt.Sprintf("/api/v2/brains/%s/pages", url.PathEscape(brainID)), q, &out); err != nil {
+	if err := c.GetQuery(ctx, fmt.Sprintf("/api/v2/brains/%s/pages", url.PathEscape(brainID)), q, &out); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -39,21 +40,21 @@ type WritePageInput struct {
 	Mode         string `json:"mode,omitempty"`
 }
 
-func (c *Client) WritePage(brainID string, input WritePageInput) (*Page, error) {
+func (c *Client) WritePage(ctx context.Context, brainID string, input WritePageInput) (*Page, error) {
 	var out Page
-	if err := c.Post(fmt.Sprintf("/api/v2/brains/%s/pages", url.PathEscape(brainID)), input, &out); err != nil {
+	if err := c.Post(ctx, fmt.Sprintf("/api/v2/brains/%s/pages", url.PathEscape(brainID)), input, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
-func (c *Client) GetPage(pageID, format string) (*Page, error) {
+func (c *Client) GetPage(ctx context.Context, pageID, format string) (*Page, error) {
 	q := url.Values{}
 	if format != "" {
 		q.Set("format", format)
 	}
 	var out Page
-	if err := c.GetQuery(fmt.Sprintf("/api/v2/pages/%s", url.PathEscape(pageID)), q, &out); err != nil {
+	if err := c.GetQuery(ctx, fmt.Sprintf("/api/v2/pages/%s", url.PathEscape(pageID)), q, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -64,9 +65,9 @@ type UpdatePageInput struct {
 	ParentPageID *string `json:"parent_page_id,omitempty"`
 }
 
-func (c *Client) UpdatePage(pageID string, input UpdatePageInput) (*Page, error) {
+func (c *Client) UpdatePage(ctx context.Context, pageID string, input UpdatePageInput) (*Page, error) {
 	var out Page
-	if err := c.Patch(fmt.Sprintf("/api/v2/pages/%s", url.PathEscape(pageID)), input, &out); err != nil {
+	if err := c.Patch(ctx, fmt.Sprintf("/api/v2/pages/%s", url.PathEscape(pageID)), input, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -77,9 +78,9 @@ type DeletePageResult struct {
 	DeletedAt string `json:"deleted_at"`
 }
 
-func (c *Client) DeletePage(pageID string) (*DeletePageResult, error) {
+func (c *Client) DeletePage(ctx context.Context, pageID string) (*DeletePageResult, error) {
 	var out DeletePageResult
-	if err := c.Delete(fmt.Sprintf("/api/v2/pages/%s", url.PathEscape(pageID)), &out); err != nil {
+	if err := c.Delete(ctx, fmt.Sprintf("/api/v2/pages/%s", url.PathEscape(pageID)), &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

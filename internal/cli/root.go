@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"context"
+
 	"github.com/spf13/cobra"
 )
 
@@ -51,6 +53,6 @@ for use with Claude Desktop, Cursor, and other MCP-aware clients.`,
 	return cmd
 }
 
-func Execute() error {
-	return newRootCmd().Execute()
+func Execute(ctx context.Context) error {
+	return newRootCmd().ExecuteContext(ctx)
 }

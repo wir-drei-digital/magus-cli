@@ -1,12 +1,15 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestClientAddsBearerAuth(t *testing.T) {
@@ -22,7 +25,7 @@ func TestClientAddsBearerAuth(t *testing.T) {
 	var out struct {
 		ID string `json:"id"`
 	}
-	if err := c.Get("/brains", &out); err != nil {
+	if err := c.Get(context.Background(), "/brains", &out); err != nil {
 		t.Fatal(err)
 	}
 	if out.ID != "x" {
@@ -39,7 +42,7 @@ func TestClientErrorResponse(t *testing.T) {
 
 	c := New(server.URL, "bad", "")
 	var out any
-	err := c.Get("/brains", &out)
+	err := c.Get(context.Background(), "/brains", &out)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -67,10 +70,44 @@ func TestClientPostJSON(t *testing.T) {
 	var out struct {
 		ID string `json:"id"`
 	}
-	if err := c.Post("/brains", map[string]string{"title": "X"}, &out); err != nil {
+	if err := c.Post(context.Background(), "/brains", map[string]string{"title": "X"}, &out); err != nil {
 		t.Fatal(err)
 	}
 	if out.ID != "new" {
 		t.Errorf("got id %q", out.ID)
+	}
+}
+
+// TestClientContextCancellation verifies that an in-flight request honours
+// context cancellation: a server that hangs forever must return promptly
+// once the caller's context is cancelled.
+func TestClientContextCancellation(t *testing.T) {
+	hang := make(chan struct{})
+	defer close(hang)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	c := New(server.URL, "tok", "")
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	var out any
+	err := c.Get(ctx, "/never", &out)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected cancellation error")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled, got %v", err)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("expected fast return after cancel, took %v", elapsed)
 	}
 }

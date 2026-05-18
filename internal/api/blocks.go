@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 )
@@ -26,17 +27,17 @@ type AddBlockInput struct {
 	Variant  string `json:"variant,omitempty"`
 }
 
-func (c *Client) AddBlock(pageID string, input AddBlockInput) (*Block, error) {
+func (c *Client) AddBlock(ctx context.Context, pageID string, input AddBlockInput) (*Block, error) {
 	var out Block
-	if err := c.Post(fmt.Sprintf("/api/v2/pages/%s/blocks", url.PathEscape(pageID)), input, &out); err != nil {
+	if err := c.Post(ctx, fmt.Sprintf("/api/v2/pages/%s/blocks", url.PathEscape(pageID)), input, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
-func (c *Client) GetBlock(id string) (*Block, error) {
+func (c *Client) GetBlock(ctx context.Context, id string) (*Block, error) {
 	var out Block
-	if err := c.Get("/api/v2/blocks/"+url.PathEscape(id), &out); err != nil {
+	if err := c.Get(ctx, "/api/v2/blocks/"+url.PathEscape(id), &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -52,23 +53,23 @@ type UpdateBlockReplace struct {
 	ReplaceAll bool   `json:"replace_all,omitempty"`
 }
 
-func (c *Client) UpdateBlockContent(id string, content map[string]any) (*Block, error) {
+func (c *Client) UpdateBlockContent(ctx context.Context, id string, content map[string]any) (*Block, error) {
 	var out Block
-	if err := c.Patch("/api/v2/blocks/"+url.PathEscape(id), UpdateBlockContent{Content: content}, &out); err != nil {
+	if err := c.Patch(ctx, "/api/v2/blocks/"+url.PathEscape(id), UpdateBlockContent{Content: content}, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
-func (c *Client) ReplaceBlockText(id, oldText, newText string, replaceAll bool) (*Block, error) {
+func (c *Client) ReplaceBlockText(ctx context.Context, id, oldText, newText string, replaceAll bool) (*Block, error) {
 	var out Block
 	input := UpdateBlockReplace{OldText: oldText, NewText: newText, ReplaceAll: replaceAll}
-	if err := c.Patch("/api/v2/blocks/"+url.PathEscape(id), input, &out); err != nil {
+	if err := c.Patch(ctx, "/api/v2/blocks/"+url.PathEscape(id), input, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
-func (c *Client) DeleteBlock(id string) error {
-	return c.Delete("/api/v2/blocks/"+url.PathEscape(id), nil)
+func (c *Client) DeleteBlock(ctx context.Context, id string) error {
+	return c.Delete(ctx, "/api/v2/blocks/"+url.PathEscape(id), nil)
 }

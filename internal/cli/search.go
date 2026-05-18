@@ -32,7 +32,7 @@ If --brain is omitted the active brain (set via 'magus brain use <id>') is used.
 			if err != nil {
 				return err
 			}
-			hits, err := c.Search(brainID, api.SearchInput{
+			hits, err := c.Search(cmd.Context(), brainID, api.SearchInput{
 				Query: args[0], Mode: mode, Limit: limit,
 			})
 			if err != nil {

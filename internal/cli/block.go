@@ -26,7 +26,7 @@ func blockAddCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			b, err := c.AddBlock(args[0], api.AddBlockInput{
+			b, err := c.AddBlock(cmd.Context(), args[0], api.AddBlockInput{
 				Type: blockType, Text: text, Level: level, Language: language,
 			})
 			if err != nil {
@@ -61,7 +61,7 @@ func blockEditCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			b, err := c.ReplaceBlockText(args[0], oldText, newText, all)
+			b, err := c.ReplaceBlockText(cmd.Context(), args[0], oldText, newText, all)
 			if err != nil {
 				return err
 			}
@@ -88,7 +88,7 @@ func blockDeleteCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := c.DeleteBlock(args[0]); err != nil {
+			if err := c.DeleteBlock(cmd.Context(), args[0]); err != nil {
 				return err
 			}
 			output.Println(quietMode, "Deleted.")

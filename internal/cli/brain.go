@@ -48,7 +48,7 @@ func brainListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			brains, err := c.ListBrains(api.ListBrainsOpts{})
+			brains, err := c.ListBrains(cmd.Context(), api.ListBrainsOpts{})
 			if err != nil {
 				return err
 			}
@@ -76,7 +76,7 @@ func brainCreateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			brain, err := c.CreateBrain(api.CreateBrainInput{
+			brain, err := c.CreateBrain(cmd.Context(), api.CreateBrainInput{
 				Title: args[0], Description: description, Icon: icon, Color: color,
 			})
 			if err != nil {
@@ -105,7 +105,7 @@ func brainShowCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			brain, err := c.GetBrain(args[0])
+			brain, err := c.GetBrain(cmd.Context(), args[0])
 			if err != nil {
 				return err
 			}
@@ -129,7 +129,7 @@ func brainArchiveCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := c.ArchiveBrain(args[0]); err != nil {
+			if err := c.ArchiveBrain(cmd.Context(), args[0]); err != nil {
 				return err
 			}
 			output.Println(quietMode, "Archived.")

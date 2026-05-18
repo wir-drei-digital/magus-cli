@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 )
@@ -22,7 +23,7 @@ type ListBrainsOpts struct {
 	Limit  int
 }
 
-func (c *Client) ListBrains(opts ListBrainsOpts) ([]Brain, error) {
+func (c *Client) ListBrains(ctx context.Context, opts ListBrainsOpts) ([]Brain, error) {
 	q := url.Values{}
 	if opts.Cursor != "" {
 		q.Set("cursor", opts.Cursor)
@@ -31,7 +32,7 @@ func (c *Client) ListBrains(opts ListBrainsOpts) ([]Brain, error) {
 		q.Set("limit", fmt.Sprintf("%d", opts.Limit))
 	}
 	var out []Brain
-	if err := c.GetQuery("/api/v2/brains", q, &out); err != nil {
+	if err := c.GetQuery(ctx, "/api/v2/brains", q, &out); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -44,17 +45,17 @@ type CreateBrainInput struct {
 	Color       string `json:"color,omitempty"`
 }
 
-func (c *Client) CreateBrain(input CreateBrainInput) (*Brain, error) {
+func (c *Client) CreateBrain(ctx context.Context, input CreateBrainInput) (*Brain, error) {
 	var out Brain
-	if err := c.Post("/api/v2/brains", input, &out); err != nil {
+	if err := c.Post(ctx, "/api/v2/brains", input, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
-func (c *Client) GetBrain(idOrSlug string) (*Brain, error) {
+func (c *Client) GetBrain(ctx context.Context, idOrSlug string) (*Brain, error) {
 	var out Brain
-	if err := c.Get("/api/v2/brains/"+url.PathEscape(idOrSlug), &out); err != nil {
+	if err := c.Get(ctx, "/api/v2/brains/"+url.PathEscape(idOrSlug), &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -67,14 +68,14 @@ type UpdateBrainInput struct {
 	Color       *string `json:"color,omitempty"`
 }
 
-func (c *Client) UpdateBrain(idOrSlug string, input UpdateBrainInput) (*Brain, error) {
+func (c *Client) UpdateBrain(ctx context.Context, idOrSlug string, input UpdateBrainInput) (*Brain, error) {
 	var out Brain
-	if err := c.Patch("/api/v2/brains/"+url.PathEscape(idOrSlug), input, &out); err != nil {
+	if err := c.Patch(ctx, "/api/v2/brains/"+url.PathEscape(idOrSlug), input, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
-func (c *Client) ArchiveBrain(idOrSlug string) error {
-	return c.Delete("/api/v2/brains/"+url.PathEscape(idOrSlug), nil)
+func (c *Client) ArchiveBrain(ctx context.Context, idOrSlug string) error {
+	return c.Delete(ctx, "/api/v2/brains/"+url.PathEscape(idOrSlug), nil)
 }

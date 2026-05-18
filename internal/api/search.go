@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 )
@@ -23,9 +24,9 @@ type SearchInput struct {
 	PageID string `json:"page,omitempty"`
 }
 
-func (c *Client) Search(brainID string, input SearchInput) ([]SearchHit, error) {
+func (c *Client) Search(ctx context.Context, brainID string, input SearchInput) ([]SearchHit, error) {
 	var out []SearchHit
-	if err := c.Post(fmt.Sprintf("/api/v2/brains/%s/search", url.PathEscape(brainID)), input, &out); err != nil {
+	if err := c.Post(ctx, fmt.Sprintf("/api/v2/brains/%s/search", url.PathEscape(brainID)), input, &out); err != nil {
 		return nil, err
 	}
 	return out, nil

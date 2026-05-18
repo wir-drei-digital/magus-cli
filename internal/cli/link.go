@@ -28,7 +28,7 @@ func newLinkCmd() *cobra.Command {
 			} else {
 				input.TargetBlockID = args[1]
 			}
-			conn, err := c.CreateBlockConnection(input)
+			conn, err := c.CreateBlockConnection(cmd.Context(), input)
 			if err != nil {
 				return err
 			}

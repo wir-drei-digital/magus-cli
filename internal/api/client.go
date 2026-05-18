@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -33,31 +34,31 @@ func New(baseURL, token, userAgent string) *Client {
 }
 
 // Get decodes the "data" field of the JSON response into `out`.
-func (c *Client) Get(path string, out any) error {
-	return c.do(http.MethodGet, path, nil, out)
+func (c *Client) Get(ctx context.Context, path string, out any) error {
+	return c.do(ctx, http.MethodGet, path, nil, out)
 }
 
 // GetQuery is like Get but appends url.Values as a query string.
-func (c *Client) GetQuery(path string, query url.Values, out any) error {
+func (c *Client) GetQuery(ctx context.Context, path string, query url.Values, out any) error {
 	if len(query) > 0 {
 		path = path + "?" + query.Encode()
 	}
-	return c.do(http.MethodGet, path, nil, out)
+	return c.do(ctx, http.MethodGet, path, nil, out)
 }
 
-func (c *Client) Post(path string, body any, out any) error {
-	return c.do(http.MethodPost, path, body, out)
+func (c *Client) Post(ctx context.Context, path string, body any, out any) error {
+	return c.do(ctx, http.MethodPost, path, body, out)
 }
 
-func (c *Client) Patch(path string, body any, out any) error {
-	return c.do(http.MethodPatch, path, body, out)
+func (c *Client) Patch(ctx context.Context, path string, body any, out any) error {
+	return c.do(ctx, http.MethodPatch, path, body, out)
 }
 
-func (c *Client) Delete(path string, out any) error {
-	return c.do(http.MethodDelete, path, nil, out)
+func (c *Client) Delete(ctx context.Context, path string, out any) error {
+	return c.do(ctx, http.MethodDelete, path, nil, out)
 }
 
-func (c *Client) do(method, path string, body, out any) error {
+func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
 	var reqBody io.Reader
 	if body != nil {
 		buf := &bytes.Buffer{}
@@ -67,7 +68,10 @@ func (c *Client) do(method, path string, body, out any) error {
 		reqBody = buf
 	}
 
-	req, err := http.NewRequest(method, c.baseURL+path, reqBody)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reqBody)
 	if err != nil {
 		return err
 	}

@@ -11,7 +11,12 @@ import (
 // Serve runs the MCP stdio server, registering all brain tools.
 // activeBrain is used as a fallback for tools that take an optional brain
 // argument (currently brain_search). Pass "" if no active brain is configured.
-func Serve(_ context.Context, client *api.Client, version, activeBrain string) error {
+//
+// The provided ctx is currently used only by future-proofing extensions to
+// ServeStdio; the request-scoped context that flows into each tool handler
+// is supplied by the MCP framework itself.
+func Serve(ctx context.Context, client *api.Client, version, activeBrain string) error {
+	_ = ctx
 	if version == "" {
 		version = "dev"
 	}

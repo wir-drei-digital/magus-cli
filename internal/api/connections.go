@@ -1,6 +1,9 @@
 package api
 
-import "net/url"
+import (
+	"context"
+	"net/url"
+)
 
 type Connection struct {
 	ID              string `json:"id"`
@@ -26,22 +29,22 @@ type CreateConnectionPageLevel struct {
 	Type         string `json:"type,omitempty"`
 }
 
-func (c *Client) CreateBlockConnection(input CreateConnectionBlockLevel) (*Connection, error) {
+func (c *Client) CreateBlockConnection(ctx context.Context, input CreateConnectionBlockLevel) (*Connection, error) {
 	var out Connection
-	if err := c.Post("/api/v2/connections", input, &out); err != nil {
+	if err := c.Post(ctx, "/api/v2/connections", input, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
-func (c *Client) CreatePageConnection(input CreateConnectionPageLevel) ([]Connection, error) {
+func (c *Client) CreatePageConnection(ctx context.Context, input CreateConnectionPageLevel) ([]Connection, error) {
 	var out []Connection
-	if err := c.Post("/api/v2/connections", input, &out); err != nil {
+	if err := c.Post(ctx, "/api/v2/connections", input, &out); err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *Client) DeleteConnection(id string) error {
-	return c.Delete("/api/v2/connections/"+url.PathEscape(id), nil)
+func (c *Client) DeleteConnection(ctx context.Context, id string) error {
+	return c.Delete(ctx, "/api/v2/connections/"+url.PathEscape(id), nil)
 }

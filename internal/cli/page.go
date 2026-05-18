@@ -46,7 +46,7 @@ If --brain is omitted the active brain (set via 'magus brain use <id>') is used.
 			if err != nil {
 				return err
 			}
-			pages, err := c.ListPages(brainID, !tree)
+			pages, err := c.ListPages(cmd.Context(), brainID, !tree)
 			if err != nil {
 				return err
 			}
@@ -84,7 +84,7 @@ func pageShowCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			page, err := c.GetPage(args[0], format)
+			page, err := c.GetPage(cmd.Context(), args[0], format)
 			if err != nil {
 				return err
 			}
@@ -146,7 +146,7 @@ With two positional args the first is the brain id-or-slug.`,
 			if err != nil {
 				return err
 			}
-			page, err := c.WritePage(brainID, api.WritePageInput{
+			page, err := c.WritePage(cmd.Context(), brainID, api.WritePageInput{
 				Title:        title,
 				Content:      content,
 				ParentPageID: parent,
@@ -198,7 +198,7 @@ func pageRenameCmd() *cobra.Command {
 				return err
 			}
 			title := args[1]
-			p, err := c.UpdatePage(args[0], api.UpdatePageInput{Title: &title})
+			p, err := c.UpdatePage(cmd.Context(), args[0], api.UpdatePageInput{Title: &title})
 			if err != nil {
 				return err
 			}
@@ -231,7 +231,7 @@ func pageMoveCmd() *cobra.Command {
 			} else {
 				return fmt.Errorf("--parent is required (use 'none' to move to root)")
 			}
-			p, err := c.UpdatePage(args[0], api.UpdatePageInput{ParentPageID: parentPtr})
+			p, err := c.UpdatePage(cmd.Context(), args[0], api.UpdatePageInput{ParentPageID: parentPtr})
 			if err != nil {
 				return err
 			}
@@ -256,7 +256,7 @@ func pageDeleteCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			res, err := c.DeletePage(args[0])
+			res, err := c.DeletePage(cmd.Context(), args[0])
 			if err != nil {
 				return err
 			}
