@@ -1,6 +1,8 @@
 ---
 name: magus
 description: Use when the user wants to read, write, search, or organize their Magus knowledge brain (also called "my brain", "my notes", "my second brain"). The magus CLI is a Bash-callable binary that authenticates against the user's workspace and exposes brain/page/block operations with JSON output for scripting.
+allowed-tools: Bash, Read, Grep
+user-invocable: true
 ---
 
 # magus — Knowledge Brain CLI
