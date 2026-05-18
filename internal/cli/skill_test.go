@@ -19,6 +19,7 @@ func TestResolveSkillPath(t *testing.T) {
 		wantErr bool
 	}{
 		{"default claude-code", "claude-code", "", filepath.Join(home, ".claude", "skills", "magus.md"), false},
+		{"claude-code-legacy alias", "claude-code-legacy", "", filepath.Join(home, ".claude", "skills", "magus.md"), false},
 		{"codex", "codex", "", filepath.Join(home, ".codex", "skills", "magus.md"), false},
 		{"path overrides target", "claude-code", "/tmp/custom.md", "/tmp/custom.md", false},
 		{"unknown target", "anthropic-workbench", "", "", true},
