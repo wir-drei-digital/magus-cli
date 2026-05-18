@@ -9,6 +9,15 @@ import (
 	"github.com/wir-drei-digital/magus-cli/internal/output"
 )
 
+// shortID returns the first 8 characters of a UUID for compact display.
+// If s is shorter than 8 characters, returns s unchanged.
+func shortID(s string) string {
+	if len(s) <= 8 {
+		return s
+	}
+	return s[:8]
+}
+
 func newBrainCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "brain",
@@ -57,9 +66,9 @@ func brainListCmd() *cobra.Command {
 			}
 			rows := make([][]string, len(brains))
 			for i, b := range brains {
-				rows[i] = []string{b.Slug, b.Title, b.UpdatedAt}
+				rows[i] = []string{shortID(b.ID), b.Slug, b.Title, b.UpdatedAt}
 			}
-			output.PrintTable([]string{"slug", "title", "updated"}, rows)
+			output.PrintTable([]string{"id", "slug", "title", "updated"}, rows)
 			return nil
 		},
 	}
@@ -112,8 +121,8 @@ func brainShowCmd() *cobra.Command {
 			if jsonMode {
 				return output.JSON(brain)
 			}
-			fmt.Printf("Title:       %s\nSlug:        %s\nDescription: %s\nUpdated:     %s\n",
-				brain.Title, brain.Slug, brain.Description, brain.UpdatedAt)
+			fmt.Printf("ID:          %s\nTitle:       %s\nSlug:        %s\nDescription: %s\nUpdated:     %s\n",
+				brain.ID, brain.Title, brain.Slug, brain.Description, brain.UpdatedAt)
 			return nil
 		},
 	}
