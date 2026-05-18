@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"os/exec"
 	"runtime"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -108,23 +110,7 @@ func browserFlow(apiURL string) (string, error) {
 	errCh := make(chan error, 1)
 
 	srv := &http.Server{
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			gotState := r.URL.Query().Get("state")
-			gotToken := r.URL.Query().Get("token")
-			if gotState != state {
-				http.Error(w, "state mismatch", http.StatusBadRequest)
-				errCh <- errors.New("state mismatch (possible CSRF)")
-				return
-			}
-			if gotToken == "" {
-				http.Error(w, "missing token", http.StatusBadRequest)
-				errCh <- errors.New("missing token in callback")
-				return
-			}
-			w.Header().Set("Content-Type", "text/html")
-			fmt.Fprintln(w, "<h1>Magus CLI authorized</h1><p>You can close this tab.</p>")
-			tokenCh <- gotToken
-		}),
+		Handler: newCallbackHandler(state, tokenCh, errCh, listener),
 	}
 
 	go func() {
@@ -144,6 +130,75 @@ func browserFlow(apiURL string) (string, error) {
 		return "", err
 	case <-time.After(5 * time.Minute):
 		return "", errors.New("login timed out")
+	}
+}
+
+// newCallbackHandler builds the http.HandlerFunc used for the localhost
+// OAuth-style callback. It enforces:
+//
+//   - method must be GET (favicon HEAD/OPTIONS probes are rejected)
+//   - path must be exactly "/" (devtools and prefetch hits to /favicon.ico,
+//     /.well-known/..., etc. don't consume the state)
+//   - Host header must begin with "127.0.0.1:" (defends against DNS
+//     rebinding from a page the user has open in another tab)
+//   - state in the query must match expectedState
+//   - token must be non-empty
+//
+// Only the first valid hit succeeds (guarded by sync.Once); subsequent
+// requests get 410 Gone. On state-mismatch or missing-token errors the
+// listener is closed immediately so further requests cannot race.
+func newCallbackHandler(expectedState string, tokenCh chan<- string, errCh chan<- error, listener net.Listener) http.HandlerFunc {
+	var once sync.Once
+	closeListener := func() {
+		if listener != nil {
+			_ = listener.Close()
+		}
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		if !strings.HasPrefix(r.Host, "127.0.0.1:") {
+			http.Error(w, "forbidden host", http.StatusForbidden)
+			return
+		}
+
+		gotState := r.URL.Query().Get("state")
+		gotToken := r.URL.Query().Get("token")
+		if gotState != expectedState {
+			http.Error(w, "state mismatch", http.StatusBadRequest)
+			select {
+			case errCh <- errors.New("state mismatch (possible CSRF)"):
+			default:
+			}
+			closeListener()
+			return
+		}
+		if gotToken == "" {
+			http.Error(w, "missing token", http.StatusBadRequest)
+			select {
+			case errCh <- errors.New("missing token in callback"):
+			default:
+			}
+			closeListener()
+			return
+		}
+
+		handled := false
+		once.Do(func() {
+			handled = true
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprintln(w, "<h1>Magus CLI authorized</h1><p>You can close this tab.</p>")
+			tokenCh <- gotToken
+		})
+		if !handled {
+			http.Error(w, "callback already consumed", http.StatusGone)
+		}
 	}
 }
 
