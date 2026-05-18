@@ -5,7 +5,7 @@ allowed-tools: Bash, Read, Grep
 user-invocable: true
 ---
 
-# magus — Knowledge Brain CLI
+# magus: Knowledge Brain CLI
 
 The user has a persistent knowledge brain. Pages contain markdown content organized into hierarchical "brains" (max 3 levels deep). The CLI talks to the user's Magus workspace over HTTP using a Personal Access Token stored on this machine.
 
@@ -55,10 +55,10 @@ magus brain use project-x
 
 This pins it to the active profile so every subsequent command picks it up automatically. After that:
 
-- `magus page list` — no `--brain` needed
-- `magus search "query"` — no `--brain` needed
-- `magus page write "Notes/Today"` — one positional arg (title); brain comes from active
-- `magus page write "Title" --file notes.md` — same
+- `magus page list`: no `--brain` needed
+- `magus search "query"`: no `--brain` needed
+- `magus page write "Notes/Today"`: one positional arg (title); brain comes from active
+- `magus page write "Title" --file notes.md`: same
 
 Inspect or clear:
 
