@@ -91,7 +91,12 @@ func (c *Config) saveTo(dir string) error {
 		return err
 	}
 	path := filepath.Join(dir, configFileName)
-	return os.WriteFile(path, data, configFileMode)
+	if err := os.WriteFile(path, data, configFileMode); err != nil {
+		return err
+	}
+	// Defeat a broken/permissive user umask that may have widened
+	// the perms set by WriteFile.
+	return os.Chmod(path, configFileMode)
 }
 
 func defaultDir() (string, error) {
