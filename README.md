@@ -60,28 +60,29 @@ Add to your `claude_desktop_config.json` (or equivalent):
 
 The MCP server reads the active profile's token from `~/.config/magus/config.toml`.
 
-## Use with Claude Code (and other agents)
+## Use with Claude Code
 
-A skill file at [`internal/skill/magus.md`](internal/skill/magus.md) teaches
-agents like Claude Code, Codex, and other markdown-frontmatter skill loaders
-when and how to invoke this CLI. Install it once:
+Magus ships as a Claude Code marketplace plugin. Install it once from inside Claude Code:
 
-```sh
-magus skill install
+```
+/plugin marketplace add wir-drei-digital/magus-cli
+/plugin install magus@wir-drei-digital
 ```
 
-By default this writes to `~/.claude/skills/magus.md`. For other agents:
+Claude Code will discover the `magus` skill and load it on relevant prompts (when you mention your brain, notes, knowledge base, etc.). The skill source ships from [`plugins/magus/skills/magus/SKILL.md`](plugins/magus/skills/magus/SKILL.md).
+
+## Use with Codex, Cursor, and other agents
+
+For agents that read markdown frontmatter skill files from a known directory, install the embedded skill via the CLI:
 
 ```sh
 magus skill install --target codex       # ~/.codex/skills/magus.md
 magus skill install --path /custom/place # arbitrary path
-magus skill install --update             # overwrite existing
 magus skill show                         # print the skill to stdout
 magus skill uninstall                    # remove the installed file
 ```
 
-The skill is embedded into the binary, so it updates atomically when you
-upgrade the CLI.
+The skill is embedded into the binary, so it updates atomically when you upgrade the CLI.
 
 ## Commands
 
