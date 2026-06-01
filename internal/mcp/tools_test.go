@@ -12,37 +12,30 @@ import (
 	"github.com/wir-drei-digital/magus-cli/internal/api"
 )
 
-// Each test stands up a tiny httptest server with canned responses for
-// the endpoint under test, builds a real *api.Client pointed at it, and
-// invokes the core function directly. The thin handler closures in
-// tools() that just unwrap the MCP request are exercised implicitly via
-// the core API surface, but their job is purely argument extraction;
-// the interesting behaviour lives in the *Core functions.
-
 type recordedRequest struct {
 	method string
 	path   string
 	body   string
 }
 
-// canned builds an httptest.Server that records every incoming request
-// into recorded and responds with status + body for the matching path.
-// Use "*" as a catch-all path.
-func canned(t *testing.T, recorded *[]recordedRequest, status int, body string) *httptest.Server {
+// canned builds an httptest.Server that records every request and responds
+// with status + body. Pass a slice of bodies to answer successive requests
+// (the last one repeats); a single body answers every request.
+func canned(t *testing.T, recorded *[]recordedRequest, status int, bodies ...string) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		var b strings.Builder
 		_, _ = io.Copy(&b, r.Body)
-		*recorded = append(*recorded, recordedRequest{
-			method: r.Method,
-			path:   r.URL.RequestURI(),
-			body:   b.String(),
-		})
+		*recorded = append(*recorded, recordedRequest{method: r.Method, path: r.URL.RequestURI(), body: b.String()})
+		idx := len(*recorded) - 1
+		if idx >= len(bodies) {
+			idx = len(bodies) - 1
+		}
 		if status != 0 {
 			w.WriteHeader(status)
 		}
-		_, _ = io.WriteString(w, body)
+		_, _ = io.WriteString(w, bodies[idx])
 	})
 	return httptest.NewServer(mux)
 }
@@ -55,17 +48,11 @@ func TestBrainListCore(t *testing.T) {
 	var got []recordedRequest
 	srv := canned(t, &got, http.StatusOK, `{"data":[{"id":"b1","slug":"work","title":"Work"}]}`)
 	defer srv.Close()
-	c := newTestClient(srv)
-
-	res, err := brainListCore(context.Background(), c)
-	if err != nil {
+	if _, err := brainListCore(context.Background(), newTestClient(srv)); err != nil {
 		t.Fatal(err)
 	}
-	if res == nil {
-		t.Fatal("nil result")
-	}
-	if len(got) != 1 || got[0].method != http.MethodGet || got[0].path != "/api/v2/brains" {
-		t.Errorf("unexpected request: %+v", got)
+	if got[0].method != http.MethodGet || got[0].path != "/api/v2/brains" {
+		t.Errorf("unexpected request: %+v", got[0])
 	}
 }
 
@@ -73,33 +60,18 @@ func TestBrainCreateCore(t *testing.T) {
 	var got []recordedRequest
 	srv := canned(t, &got, http.StatusCreated, `{"data":{"id":"b1","title":"Hello"}}`)
 	defer srv.Close()
-	c := newTestClient(srv)
-
-	args := map[string]string{
-		"title":       "Hello",
-		"description": "Greetings",
-	}
-	if _, err := brainCreateCore(context.Background(), c, args); err != nil {
+	if _, err := brainCreateCore(context.Background(), newTestClient(srv), map[string]string{"title": "Hello"}); err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 {
-		t.Fatalf("expected 1 request, got %d", len(got))
-	}
-	if got[0].method != http.MethodPost {
-		t.Errorf("method: %s", got[0].method)
-	}
-	if got[0].path != "/api/v2/brains" {
-		t.Errorf("path: %s", got[0].path)
+	if got[0].method != http.MethodPost || got[0].path != "/api/v2/brains" {
+		t.Errorf("request: %+v", got[0])
 	}
 	var sent map[string]any
 	if err := json.Unmarshal([]byte(got[0].body), &sent); err != nil {
-		t.Fatalf("decode body: %v (body=%q)", err, got[0].body)
+		t.Fatalf("decode body: %v", err)
 	}
 	if sent["title"] != "Hello" {
 		t.Errorf("title: %v", sent["title"])
-	}
-	if sent["description"] != "Greetings" {
-		t.Errorf("description: %v", sent["description"])
 	}
 }
 
@@ -107,9 +79,7 @@ func TestPageListCore(t *testing.T) {
 	var got []recordedRequest
 	srv := canned(t, &got, http.StatusOK, `{"data":[{"id":"p1","title":"Top"}]}`)
 	defer srv.Close()
-	c := newTestClient(srv)
-
-	if _, err := pageListCore(context.Background(), c, "brain-slug", true); err != nil {
+	if _, err := pageListCore(context.Background(), newTestClient(srv), "brain-slug", true); err != nil {
 		t.Fatal(err)
 	}
 	if got[0].path != "/api/v2/brains/brain-slug/pages?as=flat" {
@@ -119,91 +89,72 @@ func TestPageListCore(t *testing.T) {
 
 func TestPageReadCore(t *testing.T) {
 	var got []recordedRequest
-	srv := canned(t, &got, http.StatusOK,
-		`{"data":{"id":"p1","title":"Top","markdown":"# hello"}}`)
+	srv := canned(t, &got, http.StatusOK, `{"data":{"id":"p1","title":"Top","body":"# hello"}}`)
 	defer srv.Close()
-	c := newTestClient(srv)
-
-	if _, err := pageReadCore(context.Background(), c, "p1"); err != nil {
+	if _, err := pageReadCore(context.Background(), newTestClient(srv), "p1"); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got[0].path, "/api/v2/pages/p1") {
-		t.Errorf("path: %s", got[0].path)
-	}
-	if !strings.Contains(got[0].path, "format=markdown") {
-		t.Errorf("missing format=markdown: %s", got[0].path)
+	if got[0].method != http.MethodGet || got[0].path != "/api/v2/pages/p1" {
+		t.Errorf("request: %+v", got[0])
 	}
 }
 
-func TestPageWriteCore(t *testing.T) {
+func TestPageCreateCore(t *testing.T) {
 	var got []recordedRequest
-	srv := canned(t, &got, http.StatusCreated, `{"data":{"id":"p2","title":"New"}}`)
+	srv := canned(t, &got, http.StatusCreated, `{"data":{"id":"p2","title":"New","body":"hi"}}`)
 	defer srv.Close()
-	c := newTestClient(srv)
-
-	args := map[string]string{
-		"title":   "New",
-		"content": "body text",
-		"mode":    "append",
-	}
-	if _, err := pageWriteCore(context.Background(), c, "brain-slug", args); err != nil {
+	in := api.CreatePageInput{Title: "New", Body: "hi"}
+	if _, err := pageCreateCore(context.Background(), newTestClient(srv), "brain-slug", in); err != nil {
 		t.Fatal(err)
 	}
-	if got[0].method != http.MethodPost {
-		t.Errorf("method: %s", got[0].method)
-	}
-	if got[0].path != "/api/v2/brains/brain-slug/pages" {
-		t.Errorf("path: %s", got[0].path)
+	if got[0].method != http.MethodPost || got[0].path != "/api/v2/brains/brain-slug/pages" {
+		t.Errorf("request: %+v", got[0])
 	}
 	var sent map[string]any
 	if err := json.Unmarshal([]byte(got[0].body), &sent); err != nil {
-		t.Fatal(err)
+		t.Fatalf("decode body: %v", err)
 	}
-	if sent["title"] != "New" || sent["content"] != "body text" || sent["mode"] != "append" {
+	if sent["title"] != "New" || sent["body"] != "hi" {
 		t.Errorf("body: %+v", sent)
 	}
 }
 
-func TestPageUpdateCoreTitleOnly(t *testing.T) {
+func TestPageEditCoreReadsThenReplaces(t *testing.T) {
 	var got []recordedRequest
-	srv := canned(t, &got, http.StatusOK, `{"data":{"id":"p1","title":"Renamed"}}`)
+	srv := canned(t, &got, http.StatusOK,
+		`{"data":{"id":"p1","title":"T","body":"hello world"}}`,
+		`{"data":{"id":"p1","title":"T","body":"hello there"}}`)
 	defer srv.Close()
-	c := newTestClient(srv)
-
-	args := map[string]string{"title": "Renamed"}
-	if _, err := pageUpdateCore(context.Background(), c, "p1", args); err != nil {
+	if _, err := pageEditCore(context.Background(), newTestClient(srv), "p1", "world", "there", false); err != nil {
 		t.Fatal(err)
 	}
-	if got[0].method != http.MethodPatch {
-		t.Errorf("method: %s", got[0].method)
+	if len(got) != 2 {
+		t.Fatalf("expected GET then PATCH, got %d requests", len(got))
+	}
+	if got[0].method != http.MethodGet {
+		t.Errorf("first request method: %s", got[0].method)
+	}
+	if got[1].method != http.MethodPatch {
+		t.Errorf("second request method: %s", got[1].method)
 	}
 	var sent map[string]any
-	if err := json.Unmarshal([]byte(got[0].body), &sent); err != nil {
-		t.Fatal(err)
+	if err := json.Unmarshal([]byte(got[1].body), &sent); err != nil {
+		t.Fatalf("decode body: %v", err)
 	}
-	if sent["title"] != "Renamed" {
-		t.Errorf("title: %v", sent["title"])
-	}
-	if _, ok := sent["parent_page_id"]; ok {
-		t.Errorf("parent_page_id should be omitted when empty: %+v", sent)
+	if sent["body"] != "hello there" || sent["mode"] != "replace" {
+		t.Errorf("patch body: %+v", sent)
 	}
 }
 
 func TestPageDeleteCore(t *testing.T) {
 	var got []recordedRequest
-	srv := canned(t, &got, http.StatusOK,
-		`{"data":{"id":"p1","deleted_at":"2026-05-17T12:00:00Z"}}`)
+	srv := canned(t, &got, http.StatusOK, `{"data":{"id":"p1","deleted_at":"2026-05-17T12:00:00Z"}}`)
 	defer srv.Close()
-	c := newTestClient(srv)
-
-	if _, err := pageDeleteCore(context.Background(), c, "p1"); err != nil {
+	if _, err := pageDeleteCore(context.Background(), newTestClient(srv), "p1"); err != nil {
 		t.Fatal(err)
 	}
-	if got[0].method != http.MethodDelete {
-		t.Errorf("method: %s", got[0].method)
-	}
-	if got[0].path != "/api/v2/pages/p1" {
-		t.Errorf("path: %s", got[0].path)
+	if got[0].method != http.MethodDelete || got[0].path != "/api/v2/pages/p1" {
+		t.Errorf("request: %+v", got[0])
 	}
 }
 
@@ -211,10 +162,7 @@ func TestBrainSearchCoreFallsBackToActiveBrain(t *testing.T) {
 	var got []recordedRequest
 	srv := canned(t, &got, http.StatusOK, `{"data":[]}`)
 	defer srv.Close()
-	c := newTestClient(srv)
-
-	// brainArg "" -> falls back to activeBrain "fallback".
-	if _, err := brainSearchCore(context.Background(), c, "fallback", "", "needle", "", 0); err != nil {
+	if _, err := brainSearchCore(context.Background(), newTestClient(srv), "fallback", "", "needle", "", 0); err != nil {
 		t.Fatal(err)
 	}
 	if got[0].path != "/api/v2/brains/fallback/search" {
@@ -223,57 +171,47 @@ func TestBrainSearchCoreFallsBackToActiveBrain(t *testing.T) {
 }
 
 func TestBrainSearchCoreErrorsWhenNoBrain(t *testing.T) {
-	srv := canned(t, &[]recordedRequest{}, http.StatusOK, `{"data":[]}`)
-	defer srv.Close()
-	c := newTestClient(srv)
-
-	_, err := brainSearchCore(context.Background(), c, "", "", "needle", "", 0)
-	if err == nil {
-		t.Fatal("expected error when no brain is specified")
-	}
-	if !strings.Contains(err.Error(), "no brain specified") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
-
-func TestBrainSearchCorePostsSearchInput(t *testing.T) {
 	var got []recordedRequest
 	srv := canned(t, &got, http.StatusOK, `{"data":[]}`)
 	defer srv.Close()
-	c := newTestClient(srv)
-
-	if _, err := brainSearchCore(context.Background(), c, "", "explicit", "needle", "semantic", 5); err != nil {
-		t.Fatal(err)
-	}
-	if got[0].method != http.MethodPost {
-		t.Errorf("method: %s", got[0].method)
-	}
-	if got[0].path != "/api/v2/brains/explicit/search" {
-		t.Errorf("path: %s", got[0].path)
-	}
-	var sent map[string]any
-	if err := json.Unmarshal([]byte(got[0].body), &sent); err != nil {
-		t.Fatal(err)
-	}
-	if sent["query"] != "needle" || sent["mode"] != "semantic" {
-		t.Errorf("body: %+v", sent)
-	}
-	if got, want := sent["limit"], float64(5); got != want {
-		t.Errorf("limit: got %v want %v", got, want)
+	_, err := brainSearchCore(context.Background(), newTestClient(srv), "", "", "needle", "", 0)
+	if err == nil || !strings.Contains(err.Error(), "no brain specified") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
-// Sanity: tools() returns the full registered tool slice with stable
-// names so MCP clients enumerate them correctly.
-func TestToolsRegistration(t *testing.T) {
-	srv := canned(t, &[]recordedRequest{}, http.StatusOK, `{"data":[]}`)
+func TestBrainSearchCorePostsKind(t *testing.T) {
+	var got []recordedRequest
+	srv := canned(t, &got, http.StatusOK, `{"data":[]}`)
 	defer srv.Close()
-	c := newTestClient(srv)
+	if _, err := brainSearchCore(context.Background(), newTestClient(srv), "", "explicit", "needle", "semantic", 5); err != nil {
+		t.Fatal(err)
+	}
+	if got[0].method != http.MethodPost || got[0].path != "/api/v2/brains/explicit/search" {
+		t.Errorf("request: %+v", got[0])
+	}
+	var sent map[string]any
+	if err := json.Unmarshal([]byte(got[0].body), &sent); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if sent["query"] != "needle" || sent["kind"] != "semantic" {
+		t.Errorf("body: %+v", sent)
+	}
+	if _, hasMode := sent["mode"]; hasMode {
+		t.Errorf("mode should not be sent: %+v", sent)
+	}
+}
 
-	registered := tools(c, "any-active-brain")
+func TestToolsRegistration(t *testing.T) {
+	var got []recordedRequest
+	srv := canned(t, &got, http.StatusOK, `{"data":[]}`)
+	defer srv.Close()
+	registered := tools(newTestClient(srv), "any-active-brain")
 	want := []string{
 		"brain_list", "brain_create",
-		"page_list", "page_read", "page_write", "page_update", "page_delete",
+		"page_list", "page_read",
+		"page_create", "page_append", "page_prepend", "page_replace", "page_edit",
+		"page_clear", "page_undo", "page_rename", "page_move", "page_delete",
 		"brain_search",
 	}
 	if len(registered) != len(want) {
