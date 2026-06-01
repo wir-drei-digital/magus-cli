@@ -16,7 +16,6 @@ type Page struct {
 	UpdatedAt    string  `json:"updated_at"`
 	Markdown     string  `json:"markdown,omitempty"`
 	BlocksAdded  int     `json:"blocks_added,omitempty"`
-	Blocks       []Block `json:"blocks,omitempty"`
 	Children     []Page  `json:"children,omitempty"`
 	DeletedAt    string  `json:"deleted_at,omitempty"`
 }

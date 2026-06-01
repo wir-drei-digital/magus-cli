@@ -102,9 +102,6 @@ func pageShowCmd() *cobra.Command {
 			}
 			fmt.Printf("Title: %s\nSlug: %s\nDepth: %d\nUpdated: %s\n",
 				page.Title, page.Slug, page.Depth, page.UpdatedAt)
-			for _, b := range page.Blocks {
-				fmt.Printf("  [%s] %v\n", b.Type, b.Content)
-			}
 			return nil
 		},
 	}

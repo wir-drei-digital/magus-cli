@@ -22,9 +22,10 @@ func newRootCmd() *cobra.Command {
 		Long: `magus is the command-line interface for the Magus brain API.
 
 It authenticates with a Personal Access Token (PAT) scoped to a single
-workspace, and exposes commands for managing brains, pages, blocks,
-search, and connections. Includes a bundled stdio MCP server (` + "`magus mcp`" + `)
-for use with Claude Desktop, Cursor, and other MCP-aware clients.`,
+workspace, and exposes commands for managing brains, pages, and search.
+Pages are stored as markdown. Includes a bundled stdio MCP server
+(` + "`magus mcp`" + `) for use with Claude Desktop, Cursor, and other MCP-aware
+clients.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
@@ -54,9 +55,7 @@ for use with Claude Desktop, Cursor, and other MCP-aware clients.`,
 
 	addInGroup("data", newBrainCmd())
 	addInGroup("data", newPageCmd())
-	addInGroup("data", newBlockCmd())
 	addInGroup("data", newSearchCmd())
-	addInGroup("data", newLinkCmd())
 
 	addInGroup("agent", newMCPCmd())
 	addInGroup("agent", newSkillCmd())
