@@ -150,19 +150,19 @@ func TestSearchErrorsWhenNoBrainAndNoActive(t *testing.T) {
 	}
 }
 
-func TestPageWriteAcceptsSinglePositionalWithActiveBrain(t *testing.T) {
+func TestPageCreateAcceptsSinglePositionalWithActiveBrain(t *testing.T) {
 	// Mock API: capture the brain in path + the parsed body.
-	type writeReq struct {
+	type createReq struct {
 		Title string `json:"title"`
 	}
 	var hitPath string
-	var gotBody writeReq
+	var gotBody createReq
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hitPath = r.URL.Path
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintln(w, `{"data":{"id":"p1","title":"Notes/Today","slug":"notes-today"}}`)
+		fmt.Fprintln(w, `{"data":{"id":"p1","title":"Notes Today","slug":"notes-today"}}`)
 	}))
 	t.Cleanup(server.Close)
 
@@ -174,16 +174,16 @@ func TestPageWriteAcceptsSinglePositionalWithActiveBrain(t *testing.T) {
 	})
 
 	root := newRootCmd()
-	root.SetArgs([]string{"page", "write", "Notes/Today", "--file", writeTempMarkdown(t)})
+	root.SetArgs([]string{"page", "create", "Notes Today", "--file", writeTempMarkdown(t)})
 	if err := root.Execute(); err != nil {
-		t.Fatalf("page write: %v", err)
+		t.Fatalf("page create: %v", err)
 	}
 
 	if hitPath != "/api/v2/brains/from-active/pages" {
 		t.Errorf("expected brain in path, got %s", hitPath)
 	}
-	if gotBody.Title != "Notes/Today" {
-		t.Errorf("expected title 'Notes/Today', got %q", gotBody.Title)
+	if gotBody.Title != "Notes Today" {
+		t.Errorf("expected title 'Notes Today', got %q", gotBody.Title)
 	}
 }
 

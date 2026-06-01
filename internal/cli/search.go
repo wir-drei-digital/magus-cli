@@ -10,13 +10,14 @@ import (
 )
 
 func newSearchCmd() *cobra.Command {
-	var brainFlag, mode string
+	var brainFlag, kind string
 	var limit int
+	var crossBrain bool
 	cmd := &cobra.Command{
 		Use:   "search <query>",
 		Args:  cobra.ExactArgs(1),
 		Short: "Search brain content",
-		Long: `Search across a brain's pages and file chunks.
+		Long: `Search across a brain's pages and attached file chunks.
 
 If --brain is omitted the active brain (set via 'magus brain use <id>') is used.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -33,7 +34,7 @@ If --brain is omitted the active brain (set via 'magus brain use <id>') is used.
 				return err
 			}
 			hits, err := c.Search(cmd.Context(), brainID, api.SearchInput{
-				Query: args[0], Mode: mode, Limit: limit,
+				Query: args[0], Kind: kind, Limit: limit, CrossBrain: crossBrain,
 			})
 			if err != nil {
 				return err
@@ -42,13 +43,22 @@ If --brain is omitted the active brain (set via 'magus brain use <id>') is used.
 				return output.JSON(hits)
 			}
 			for _, h := range hits {
-				fmt.Printf("[%s %.2f] %s\n", h.Kind, h.Score, h.Snippet)
+				score := h.Score
+				if score == 0 {
+					score = h.Rank
+				}
+				label := h.Title
+				if label == "" {
+					label = h.PageID
+				}
+				fmt.Printf("[%s %.2f] %s  %s\n", h.Kind, score, label, h.Snippet)
 			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&brainFlag, "brain", "", "brain id or slug (defaults to active brain)")
-	cmd.Flags().StringVar(&mode, "mode", "", "hybrid (default) | semantic | text")
+	cmd.Flags().StringVar(&kind, "kind", "", "unified (default) | semantic | text")
 	cmd.Flags().IntVar(&limit, "limit", 0, "max results")
+	cmd.Flags().BoolVar(&crossBrain, "cross-brain", false, "search across all accessible brains")
 	return cmd
 }
