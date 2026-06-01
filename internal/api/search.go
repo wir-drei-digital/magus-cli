@@ -15,13 +15,19 @@ type SearchHit struct {
 	Snippet    string  `json:"snippet"`
 	Score      float64 `json:"score"`
 	PageNumber int     `json:"page_number,omitempty"`
+	Rank       float64 `json:"rank,omitempty"`
+	SourceID   string  `json:"source_id,omitempty"`
+	FileID     string  `json:"file_id,omitempty"`
+	Title      string  `json:"title,omitempty"`
 }
 
 type SearchInput struct {
-	Query  string `json:"query"`
-	Mode   string `json:"mode,omitempty"`
-	Limit  int    `json:"limit,omitempty"`
-	PageID string `json:"page,omitempty"`
+	Query      string `json:"query"`
+	Mode       string `json:"mode,omitempty"`
+	Limit      int    `json:"limit,omitempty"`
+	PageID     string `json:"page,omitempty"`
+	Kind       string `json:"kind,omitempty"`
+	CrossBrain bool   `json:"cross_brain,omitempty"`
 }
 
 func (c *Client) Search(ctx context.Context, brainID string, input SearchInput) ([]SearchHit, error) {
