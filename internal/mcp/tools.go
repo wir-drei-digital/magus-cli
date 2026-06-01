@@ -248,7 +248,7 @@ func pageListCore(ctx context.Context, c *api.Client, brainID string, asFlat boo
 }
 
 func pageReadCore(ctx context.Context, c *api.Client, pageID string) (*mcpgo.CallToolResult, error) {
-	return resultFromPage(c.GetPage(ctx, pageID, ""))
+	return resultFromPage(c.GetPage(ctx, pageID))
 }
 
 func pageCreateCore(ctx context.Context, c *api.Client, brainID string, input api.CreatePageInput) (*mcpgo.CallToolResult, error) {
@@ -256,7 +256,7 @@ func pageCreateCore(ctx context.Context, c *api.Client, brainID string, input ap
 }
 
 func pageEditCore(ctx context.Context, c *api.Client, pageID, find, with string, all bool) (*mcpgo.CallToolResult, error) {
-	page, err := c.GetPage(ctx, pageID, "")
+	page, err := c.GetPage(ctx, pageID)
 	if err != nil {
 		return nil, err
 	}

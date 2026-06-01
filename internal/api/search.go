@@ -7,26 +7,21 @@ import (
 )
 
 type SearchHit struct {
-	Kind       string  `json:"kind"`
-	ID         string  `json:"id"`
-	PageID     string  `json:"page_id"`
-	PageTitle  string  `json:"page_title,omitempty"`
-	BrainID    string  `json:"brain_id,omitempty"`
-	Snippet    string  `json:"snippet"`
-	Score      float64 `json:"score"`
-	PageNumber int     `json:"page_number,omitempty"`
-	Rank       float64 `json:"rank,omitempty"`
-	SourceID   string  `json:"source_id,omitempty"`
-	FileID     string  `json:"file_id,omitempty"`
-	Title      string  `json:"title,omitempty"`
+	Kind     string  `json:"kind"`
+	Score    float64 `json:"score,omitempty"`
+	Rank     float64 `json:"rank,omitempty"`
+	BrainID  string  `json:"brain_id,omitempty"`
+	PageID   string  `json:"page_id,omitempty"`
+	SourceID string  `json:"source_id,omitempty"`
+	FileID   string  `json:"file_id,omitempty"`
+	Title    string  `json:"title,omitempty"`
+	Snippet  string  `json:"snippet"`
 }
 
 type SearchInput struct {
 	Query      string `json:"query"`
-	Mode       string `json:"mode,omitempty"`
-	Limit      int    `json:"limit,omitempty"`
-	PageID     string `json:"page,omitempty"`
 	Kind       string `json:"kind,omitempty"`
+	Limit      int    `json:"limit,omitempty"`
 	CrossBrain bool   `json:"cross_brain,omitempty"`
 }
 

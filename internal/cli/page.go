@@ -94,7 +94,7 @@ func pageShowCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			page, err := c.GetPage(cmd.Context(), pageID, "")
+			page, err := c.GetPage(cmd.Context(), pageID)
 			if err != nil {
 				return err
 			}
@@ -226,7 +226,7 @@ func pageEditCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			page, err := c.GetPage(cmd.Context(), pageID, "")
+			page, err := c.GetPage(cmd.Context(), pageID)
 			if err != nil {
 				return err
 			}
