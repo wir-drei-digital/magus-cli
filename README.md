@@ -32,7 +32,8 @@ Create a brain and a page:
 
 ```sh
 magus brain create "My Research"
-echo "# Notes\n\nFirst paragraph." | magus page write my-research "Today/Notes"
+magus brain use my-research
+printf '# Notes\n\nFirst paragraph.\n' | magus page create "Today Notes"
 ```
 
 Search:
@@ -90,11 +91,10 @@ The skill is embedded into the binary, so it updates atomically when you upgrade
 - `magus profiles`, `magus profile use <name>`: switch workspaces
 - `magus brain list|create|show|archive`
 - `magus brain use|current|unset`: pin a default brain so other commands can drop `--brain`
-- `magus page list|show|write|rename|move|delete`
-- `magus search <query> [--brain <id>]`
-- `magus block add|edit|delete`
-- `magus link <source-block> <target> [--type relates_to]`
+- `magus page list|show|create|append|prepend|replace|edit|clear|undo|rename|move|delete`
+- `magus search <query> [--kind unified|semantic|text] [--cross-brain]`
 - `magus mcp`: stdio MCP server
+- `magus skill install|show|uninstall`: manage the embedded agent skill
 - `magus update [--check] [--force]`: self-update to the latest GitHub release
 
 Global flags: `--profile <name>`, `--json`, `--quiet`.
