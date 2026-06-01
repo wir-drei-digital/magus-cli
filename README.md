@@ -87,17 +87,57 @@ The skill is embedded into the binary, so it updates atomically when you upgrade
 
 ## Commands
 
-- `magus login [--token PAT]`: authorize
-- `magus profiles`, `magus profile use <name>`: switch workspaces
-- `magus brain list|create|show|archive`
-- `magus brain use|current|unset`: pin a default brain so other commands can drop `--brain`
-- `magus page list|show|create|append|prepend|replace|edit|clear|undo|rename|move|delete`
-- `magus search <query> [--kind unified|semantic|text] [--cross-brain]`
-- `magus mcp`: stdio MCP server
-- `magus skill install|show|uninstall`: manage the embedded agent skill
-- `magus update [--check] [--force]`: self-update to the latest GitHub release
+`<ref>` is a page id, a page slug (in the active brain), or `brain/page-slug`.
 
-Global flags: `--profile <name>`, `--json`, `--quiet`.
+### Auth and profiles
+
+- `magus login [--token PAT]`: authorize this machine (browser flow, or pass a PAT directly)
+- `magus logout`: remove the active profile
+- `magus whoami`: print the active profile
+- `magus profiles`, `magus profile use <name>`: list and switch profiles (one per workspace)
+
+### Brains
+
+- `magus brain list|create|show|archive`
+- `magus brain use <ref>`, `magus brain current`, `magus brain unset`: pin a default brain so other commands can drop `--brain`
+
+### Pages
+
+Each page is a single markdown document.
+
+| Command | Description |
+|---|---|
+| `page list [--brain <ref>] [--tree]` | List pages, flat or as a `--tree` |
+| `page show <ref>` | Print the markdown body (`--json` for metadata) |
+| `page create <title> [--parent <ref>] [--file f.md]` | Create a page; body from stdin or `--file` |
+| `page append <ref>`, `page prepend <ref>` | Add markdown to the end or start (stdin or `--file`) |
+| `page replace <ref>` | Overwrite the entire body |
+| `page edit <ref> --find "old" --with "new" [--all]` | Find and replace; must match once unless `--all` |
+| `page clear <ref>` | Empty the body, keep the page |
+| `page undo <ref>` | Revert the last body change |
+| `page rename <ref> <title>` | Rename a page |
+| `page move <ref> --parent <ref\|none>` | Reparent (`none` moves to root) |
+| `page delete <ref>` | Soft-delete (recoverable from trash) |
+
+Link pages by writing `[[Page Title]]` into a body (for example with `magus page append`). There is no separate link command.
+
+### Search
+
+- `magus search <query> [--brain <ref>] [--kind unified|semantic|text] [--cross-brain] [--limit N]`
+
+`--kind` is `unified` (default: semantic + full-text + file chunks), `semantic`, or `text`.
+
+### Agent integration
+
+- `magus mcp`: bundled stdio MCP server (mirrors the page, brain, and search tools)
+- `magus skill install|show|uninstall`: manage the embedded agent skill
+
+### System
+
+- `magus update [--check] [--force]`: self-update to the latest GitHub release
+- `magus version`: print the version
+
+Global flags: `--profile <name>`, `--json`, `--quiet`, `--api-url <url>`.
 
 ## License
 
