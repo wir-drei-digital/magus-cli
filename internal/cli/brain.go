@@ -162,7 +162,7 @@ func brainUseCmd() *cobra.Command {
 		Use:   "use <id-or-slug>",
 		Short: "Set the active brain for this profile",
 		Long: `Stores <id-or-slug> as the active brain for the current profile so that
-subsequent commands (page list, search, page write) don't need --brain.
+subsequent commands (page list, search, page create) don't need --brain.
 
 Resolution order everywhere:
   1. explicit --brain flag (or positional arg)

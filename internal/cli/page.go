@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -141,6 +142,16 @@ func pageCreateCmd() *cobra.Command {
 			}
 			page, err := c.CreatePage(cmd.Context(), brainID, input)
 			if err != nil {
+				var apiErr *api.Error
+				if errors.As(err, &apiErr) && apiErr.Code == "already_exists" {
+					if d, ok := apiErr.Details.(map[string]any); ok {
+						id, _ := d["existing_page_id"].(string)
+						title, _ := d["existing_page_title"].(string)
+						if id != "" {
+							return fmt.Errorf("a page titled %q already exists (id %s); add to it with: magus page append %s", title, id, id)
+						}
+					}
+				}
 				return err
 			}
 			if jsonMode {
