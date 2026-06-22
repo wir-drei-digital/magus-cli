@@ -58,6 +58,7 @@ clients.`,
 	addInGroup("data", newSearchCmd())
 
 	addInGroup("agent", newMCPCmd())
+	addInGroup("agent", newACPCmd())
 	addInGroup("agent", newSkillCmd())
 
 	addInGroup("system", newVersionCmd())
