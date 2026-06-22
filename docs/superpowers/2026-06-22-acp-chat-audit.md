@@ -125,6 +125,17 @@ These are design-time hardening items in the chat-CLI plan's `Confine`/policy co
 
 ---
 
+## Second adversarial review round (post-fix)
+
+After the fixes above, a second multi-agent review (6 units: 3 adversarial code lenses over the built-code commit + 3 doc verifiers over the plan/spec patches, high/critical findings refute-verified) checked the work itself. The built-code concurrency was confirmed **race-free** by reasoning plus `go test -race -count=3` and a 50× stress of the cancel/re-entrant paths; the server-plan corrections were re-verified accurate against the real magus code (the `mcp_result` 5-tuple is consistent at all sites; `message_history!`, `strategy_opts()`, the `SseStreamer` field caveat, and the `safe_execute_module` timeout note all check out). It surfaced a few items, now fixed:
+
+- **`session/cancel` conformance (medium):** the threaded-ctx cancel made `Agent.Prompt` return a JSON-RPC error (`-32800`) instead of the ACP-idiomatic `PromptResponse{StopReason: cancelled}`. Fixed — `Prompt` now returns `StopReason: cancelled` (nil error) when the per-request ctx is cancelled (matches the SDK reference agent). Test added.
+- **`resource_link` when fs unavailable (low):** `promptText` injected a "referenced file" hint even when `read_file` wasn't advertised (editor lacks `fs.readTextFile`), implying a fetch the cloud can't perform. Fixed — the hint is gated on `canRead`; otherwise the block is reported as dropped.
+- **Allowlist guarantee (low, doc):** the chat-CLI plan's `AddAllow` stored the **parent directory**, contradicting its own "cannot leak to `a.txt.bak`" guarantee (it actually granted the whole dir). Fixed — `AddAllow` now stores the **exact resolved file path** (`within()` matches the equal case), so an allow-always scopes to that one file; doc guarantee corrected.
+- **`O_NOFOLLOW` portability (info, doc):** noted that `syscall.O_NOFOLLOW` is POSIX-only and the planned `read_file` `Execute` needs a build-tagged Windows fallback (magus ships a Windows binary).
+
+Still deferred (documented, needs server-side work): a cancelled cloud-side turn keeps running, so a stale `turn.done` could complete a subsequent prompt — to be closed when the server cancel frame / turn-id correlation lands.
+
 ## Note on the server bridge
 
 The magus Phoenix server bridge described in `2026-06-02-magus-chat-server-bridge.md` is **still unbuilt**. The CLI↔server contract findings (§2) and the plan-vs-reality drifts (§3) are therefore design-time corrections to the plan, not live defects against a running server. They should be resolved before, and verified during, implementation of the bridge.

@@ -146,6 +146,47 @@ func TestNewSessionEmptyConversationIDIsError(t *testing.T) {
 	}
 }
 
+func TestPromptCancelledReturnsStopReasonCancelled(t *testing.T) {
+	a := New("tok", "https://magus.digital", "ua")
+	cloud := newFakeCloud()
+	sess := &Session{ID: "c1", ChatSID: "s1", Cloud: cloud, Editor: &fakeEditor{}, Ctx: context.Background()}
+	go sess.Run()
+	a.mu.Lock()
+	a.sessions["c1"] = sess
+	a.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	type res struct {
+		resp sdk.PromptResponse
+		err  error
+	}
+	got := make(chan res, 1)
+	go func() {
+		resp, err := a.Prompt(ctx, sdk.PromptRequest{SessionId: "c1", Prompt: []sdk.ContentBlock{sdk.TextBlock("hi")}})
+		got <- res{resp, err}
+	}()
+
+	// Wait for the chat frame (turn in flight), then cancel.
+	select {
+	case <-cloud.sent:
+	case <-time.After(time.Second):
+		t.Fatal("no chat frame sent")
+	}
+	cancel()
+
+	select {
+	case r := <-got:
+		if r.err != nil {
+			t.Fatalf("cancel should resolve cleanly, got error %v", r.err)
+		}
+		if r.resp.StopReason != sdk.StopReasonCancelled {
+			t.Errorf("stopReason = %q, want %q", r.resp.StopReason, sdk.StopReasonCancelled)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Prompt did not return on cancel")
+	}
+}
+
 func TestUnsupportedMethodsReturnMethodNotFound(t *testing.T) {
 	a := New("tok", "https://magus.digital", "ua")
 	if _, err := a.SetSessionMode(context.Background(), sdk.SetSessionModeRequest{}); err == nil {

@@ -12,6 +12,23 @@ import (
 	"github.com/coder/websocket"
 )
 
+func TestFrameErr(t *testing.T) {
+	cases := []struct {
+		code, msg, want string
+	}{
+		{"forbidden", "not yours", "forbidden: not yours"},
+		{"", "boom", "boom"},
+		{"bad_frame", "", "bad_frame"},
+		{"", "", "server error"},
+	}
+	for _, c := range cases {
+		got := frameErr(FrameError{Code: c.code, Message: c.msg}).Error()
+		if got != c.want {
+			t.Errorf("frameErr(%q,%q) = %q, want %q", c.code, c.msg, got, c.want)
+		}
+	}
+}
+
 func TestClientRoundTrip(t *testing.T) {
 	gotResult := make(chan McpResult, 1)
 

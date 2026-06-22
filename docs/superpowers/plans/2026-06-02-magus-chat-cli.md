@@ -619,7 +619,7 @@ git commit -m "feat(chat): path confinement against traversal and symlink escape
 
 > `Plan` does the tool-specific safety (confinement) and produces `Display` — the **client-canonical** string shown at approval. `Execute` reads only what `Plan` resolved. This is the anti-spoofing seam.
 >
-> **Security (TOCTOU):** confinement runs at `Plan` time, but `Execute` runs after the human-approval window. Re-opening by name re-resolves symlinks, so a racing local process could swap a component to point outside root between approval and open. `Execute` therefore opens with `O_NOFOLLOW` on the final component and fstat-compares against the Plan-time inode. A residual race remains on the *path prefix* (an attacker who can swap a parent directory mid-window); we accept it under the single-user dev threat model (the attacker already runs as the user on the same machine) and document it in the Security section.
+> **Security (TOCTOU):** confinement runs at `Plan` time, but `Execute` runs after the human-approval window. Re-opening by name re-resolves symlinks, so a racing local process could swap a component to point outside root between approval and open. `Execute` therefore opens with `O_NOFOLLOW` on the final component and fstat-compares against the Plan-time inode. A residual race remains on the *path prefix* (an attacker who can swap a parent directory mid-window); we accept it under the single-user dev threat model (the attacker already runs as the user on the same machine) and document it in the Security section. **Portability:** `syscall.O_NOFOLLOW` is POSIX-only (darwin/linux); since `magus` also ships a Windows build (goreleaser), put the `O_NOFOLLOW` open in a build-tagged `readfile_unix.go` with a `readfile_windows.go` fallback (plain `os.Open`, weaker guarantee) so the Windows build still compiles.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -851,7 +851,7 @@ git commit -m "feat(chat): tool contract + confined size-capped read_file"
 - Create: `internal/localtool/policy.go`
 - Test: `internal/localtool/policy_test.go`
 
-> **Security (allow-rule boundary):** `Decide` matches persisted allow rules on **path-segment boundaries** via `within()` (reused from `confine.go`), never a raw `strings.HasPrefix`. A raw prefix would let "allow always" on `/proj/a.txt` silently auto-approve `/proj/a.txt.bak`, `/proj/a.txtsecrets`, etc. Correspondingly, `AddAllow` persists the file's **parent directory** as the rule's `PathPrefix` (the prefix bounds a subtree), not the resolved file path itself.
+> **Security (allow-rule boundary):** `Decide` matches persisted allow rules on **path-segment boundaries** via `within()` (reused from `confine.go`), never a raw `strings.HasPrefix`. A raw prefix would let "allow always" on `/proj/a.txt` silently auto-approve `/proj/a.txt.bak`, `/proj/a.txtsecrets`, etc. Correspondingly, `AddAllow` persists the **exact resolved file path** as the rule's `PathPrefix` (`within()` also matches the equal case), so an allow-always on `/proj/a.txt` matches only `/proj/a.txt` — not `/proj/a.txt.bak` or any sibling. A per-file approval is never widened into a whole-directory grant.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -917,8 +917,6 @@ Expected: FAIL — `undefined: NewPolicy`.
 package localtool
 
 import (
-	"path/filepath"
-
 	"github.com/wir-drei-digital/magus-cli/internal/config"
 )
 
@@ -962,20 +960,18 @@ func (p *Policy) Decide(plan Plan) Decision {
 	}
 }
 
-// AddAllow persists an "allow always" rule for this tool+path.
+// AddAllow persists an "allow always" rule scoped to this exact tool+path.
 //
-// PathPrefix is matched on segment boundaries by Decide (via within), so for a
-// file tool like read_file we must NOT persist the resolved FILE path as the
-// prefix: that would mean a future "allow always" on /proj/a.txt also matches
-// nothing else (good) but storing the file as a prefix is conceptually wrong —
-// the prefix is meant to bound a subtree. Persist the file's PARENT directory
-// as the prefix so the rule reads as "this tool, anywhere under this dir", and
-// the boundary check in Decide stays correct. (Alternatively, store the exact
-// file path and compare by equality; we choose the parent-dir prefix to match
-// the AllowRule.PathPrefix subtree semantics.)
+// Decide matches PathPrefix on segment boundaries via within(), and within()
+// also matches the equal case (rel == "."). Persisting the exact resolved path
+// therefore scopes the rule to that one file: an "allow always" on /proj/a.txt
+// matches /proj/a.txt and nothing else — NOT /proj/a.txt.bak, NOT siblings.
+// This is the tightest, least-surprising "allow always for THIS file"
+// semantics. (A broader "allow this directory" grant would store a parent
+// directory as the prefix; we deliberately do not, so a per-file approval is
+// never silently widened into a whole-subtree grant.)
 func (p *Policy) AddAllow(plan Plan) {
-	prefix := filepath.Dir(plan.MatchPath)
-	p.perms.Allow = append(p.perms.Allow, config.AllowRule{Tool: plan.Tool, PathPrefix: prefix})
+	p.perms.Allow = append(p.perms.Allow, config.AllowRule{Tool: plan.Tool, PathPrefix: plan.MatchPath})
 }
 
 func (p *Policy) tierDefault(tier string) string {
@@ -2090,8 +2086,8 @@ git add -A && git commit -m "chore(chat): verification fixups"
 
 - **Threat model:** single-user developer machine. The cloud agent is semi-trusted (its tool proposals are policy-gated and human-approved); a local attacker who already runs code as the same user is largely out of scope, which bounds the severity of the residual races below.
 - **Path confinement (Task 4):** three layers — lexical (`../`/absolute-outside), symlink-on-existing-target, and nonexistent-leaf ancestor resolution. The third layer closes the symlinked-parent / nonexistent-leaf write-outside-root hole that lands with the deferred `write_file` (test noted in Task 4).
-- **Execute TOCTOU (Task 5):** confinement happens at `Plan` time but `Execute` runs after the human-approval window. `read_file` opens the resolved path with `O_NOFOLLOW` and fstat-compares against the Plan-time inode. **Residual race:** an attacker who can swap a *parent directory* component between approval and open could still redirect the open; this is accepted under the single-user threat model and should be revisited (openat-style fd-relative traversal) if the model ever widens.
-- **Allow-rule boundary (Task 6):** persisted "allow always" rules match on path-segment boundaries via `within()`, never raw `strings.HasPrefix`, and `AddAllow` stores the parent directory as the subtree prefix — so an allow on `/proj/a.txt` cannot leak to `/proj/a.txt.bak`.
+- **Execute TOCTOU (Task 5):** confinement happens at `Plan` time but `Execute` runs after the human-approval window. `read_file` opens the resolved path with `O_NOFOLLOW` and fstat-compares against the Plan-time inode. **Residual race:** an attacker who can swap a *parent directory* component between approval and open could still redirect the open; this is accepted under the single-user threat model and should be revisited (openat-style fd-relative traversal) if the model ever widens. **POSIX-only:** `syscall.O_NOFOLLOW` is darwin/linux; build-tag a Windows fallback (`magus` ships a Windows binary).
+- **Allow-rule boundary (Task 6):** persisted "allow always" rules match on path-segment boundaries via `within()`, never raw `strings.HasPrefix`, and `AddAllow` stores the **exact resolved file path** (`within()` matches the equal case) — so an allow on `/proj/a.txt` matches only `/proj/a.txt`, never `/proj/a.txt.bak` or a sibling. (A whole-directory grant would store a parent dir instead; we don't, to avoid widening a per-file approval.)
 - **Anti-spoofing:** the approver only ever renders `plan.Display` (built client-side in `Tool.Plan`); no server-supplied path reaches the prompt (Tasks 5, 7, 9).
 
 ## Self-review notes (coverage vs. spec §5.3, §7)

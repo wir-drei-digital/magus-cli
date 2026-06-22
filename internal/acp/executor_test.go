@@ -60,6 +60,21 @@ func TestExecutorUnknownToolDenied(t *testing.T) {
 	}
 }
 
+func TestExecutorReadFileDeniedWhenNotAdvertised(t *testing.T) {
+	// fs off → NewSession advertises no local tools → Advertised is empty → an
+	// inbound read_file mcp_call must be denied at the gate, with no permission
+	// round-trip to the editor.
+	ed := &fakeEditor{permOptionID: "allow", fileContent: "x"}
+	e := &Executor{SessionID: "s", Editor: ed, Advertised: map[string]bool{}, Ctx: context.Background()}
+	res := e.Handle(chat.McpCall{CallID: "1", ToolName: "read_file", Params: map[string]any{"path": "a.txt"}})
+	if res.Status != "denied" {
+		t.Fatalf("read_file must be denied when not advertised, got %+v", res)
+	}
+	if ed.asked {
+		t.Error("must not request permission for an unadvertised tool")
+	}
+}
+
 func TestExecutorMissingPathError(t *testing.T) {
 	res := newExec(&fakeEditor{}).Handle(chat.McpCall{CallID: "1", ToolName: "read_file", Params: map[string]any{}})
 	if res.Status != "error" {

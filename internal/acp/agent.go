@@ -170,17 +170,24 @@ func (a *Agent) NewSession(ctx context.Context, req sdk.NewSessionRequest) (sdk.
 func (a *Agent) Prompt(ctx context.Context, req sdk.PromptRequest) (sdk.PromptResponse, error) {
 	a.mu.Lock()
 	sess := a.sessions[string(req.SessionId)]
+	canRead := a.editorFS
 	a.mu.Unlock()
 	if sess == nil {
 		return sdk.PromptResponse{}, sdk.NewInvalidParams("unknown session")
 	}
-	if dropped := droppedBlockKinds(req.Prompt); len(dropped) > 0 {
-		fmt.Fprintf(os.Stderr, "magus acp: dropped %d unsupported prompt block(s): %v\n", len(dropped), dropped)
+	if dropped := droppedBlockKinds(req.Prompt, canRead); len(dropped) > 0 {
+		fmt.Fprintf(os.Stderr, "magus acp: dropped %d unforwardable prompt block(s): %v\n", len(dropped), dropped)
 	}
 	// Thread the SDK's per-request context so an editor session/cancel (which the
 	// SDK signals by cancelling this ctx) returns the prompt promptly.
-	stop, err := sess.Prompt(ctx, promptText(req.Prompt))
+	stop, err := sess.Prompt(ctx, promptText(req.Prompt, canRead))
 	if err != nil {
+		// A session/cancel cancels the per-request ctx. ACP models cancellation
+		// as a clean terminal outcome, so report stopReason "cancelled" (a
+		// successful result) rather than a JSON-RPC error.
+		if ctx.Err() != nil {
+			return sdk.PromptResponse{StopReason: sdk.StopReasonCancelled}, nil
+		}
 		return sdk.PromptResponse{}, err
 	}
 	return sdk.PromptResponse{StopReason: sdk.StopReason(stop)}, nil
@@ -194,14 +201,16 @@ func (a *Agent) Cancel(_ context.Context, _ sdk.CancelNotification) error { retu
 
 // promptText builds the text forwarded to the cloud. Text blocks are
 // concatenated; resource_link blocks (ACP baseline, e.g. Zed @-mentions) are
-// forwarded as a textual reference so the cloud agent can read_file them.
-func promptText(blocks []sdk.ContentBlock) string {
+// forwarded as a textual reference so the cloud agent can read_file them — but
+// only when read_file is actually advertised (canRead), since otherwise the
+// cloud has no way to fetch the referenced file and the hint would mislead.
+func promptText(blocks []sdk.ContentBlock, canRead bool) string {
 	var b strings.Builder
 	for _, blk := range blocks {
 		switch {
 		case blk.Text != nil:
 			b.WriteString(blk.Text.Text)
-		case blk.ResourceLink != nil:
+		case blk.ResourceLink != nil && canRead:
 			rl := blk.ResourceLink
 			if rl.Name != "" {
 				fmt.Fprintf(&b, "\n[referenced file: %s (%s)]\n", rl.Name, rl.Uri)
@@ -213,15 +222,20 @@ func promptText(blocks []sdk.ContentBlock) string {
 	return b.String()
 }
 
-// droppedBlockKinds lists prompt block kinds the bridge cannot forward (image,
-// audio, embedded resource). A conformant editor won't send these (we advertise
-// no matching promptCapabilities), but if one does we surface the silent loss.
-func droppedBlockKinds(blocks []sdk.ContentBlock) []string {
+// droppedBlockKinds lists prompt block kinds the bridge could not forward, so
+// Prompt can surface the silent loss on stderr. image/audio/embedded-resource
+// are always unforwardable (we advertise no matching promptCapabilities); a
+// resource_link is unforwardable only when read_file is not advertised.
+func droppedBlockKinds(blocks []sdk.ContentBlock, canRead bool) []string {
 	var kinds []string
 	for _, blk := range blocks {
 		switch {
-		case blk.Text != nil, blk.ResourceLink != nil:
+		case blk.Text != nil:
 			// forwarded by promptText
+		case blk.ResourceLink != nil:
+			if !canRead {
+				kinds = append(kinds, "resource_link (no fs)")
+			}
 		case blk.Image != nil:
 			kinds = append(kinds, "image")
 		case blk.Audio != nil:
