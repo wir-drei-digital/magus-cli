@@ -31,7 +31,7 @@ func TestSessionPromptStreamsAndCompletes(t *testing.T) {
 
 	done := make(chan string, 1)
 	go func() {
-		sr, _ := s.Prompt("hello")
+		sr, _ := s.Prompt(context.Background(), "hello")
 		done <- sr
 	}()
 
@@ -71,7 +71,7 @@ func TestSessionPromptRejectsReentrantCall(t *testing.T) {
 	go s.Run()
 
 	// First prompt: no turn.done is ever sent, so it stays in flight.
-	go func() { _, _ = s.Prompt("first") }()
+	go func() { _, _ = s.Prompt(context.Background(), "first") }()
 
 	// Wait for the first prompt's chat frame so we know its turnDone is set.
 	select {
@@ -87,7 +87,7 @@ func TestSessionPromptRejectsReentrantCall(t *testing.T) {
 	}
 	got := make(chan result, 1)
 	go func() {
-		sr, err := s.Prompt("second")
+		sr, err := s.Prompt(context.Background(), "second")
 		got <- result{sr, err}
 	}()
 
@@ -101,6 +101,45 @@ func TestSessionPromptRejectsReentrantCall(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("re-entrant prompt did not return promptly")
+	}
+}
+
+func TestSessionPromptUnblocksOnContextCancel(t *testing.T) {
+	cloud := newFakeCloud()
+	ed := &fakeEditor{}
+	s := &Session{ID: "conv1", ChatSID: "sid1", Cloud: cloud, Editor: ed, Ctx: context.Background()}
+	go s.Run()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	got := make(chan error, 1)
+	go func() {
+		_, err := s.Prompt(ctx, "hello")
+		got <- err
+	}()
+
+	// Wait for the chat frame so the turn is in flight, then cancel the context.
+	select {
+	case <-cloud.sent:
+	case <-time.After(time.Second):
+		t.Fatal("prompt never sent a chat frame")
+	}
+	cancel()
+
+	select {
+	case err := <-got:
+		if err == nil {
+			t.Fatal("expected context cancellation to unblock Prompt with an error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Prompt did not unblock on context cancel")
+	}
+
+	// After a cancelled turn, a fresh Prompt must be accepted (turnDone cleared).
+	go func() { _, _ = s.Prompt(context.Background(), "again") }()
+	select {
+	case <-cloud.sent:
+	case <-time.After(time.Second):
+		t.Fatal("a new prompt after cancel was rejected (turnDone not cleared)")
 	}
 }
 

@@ -128,7 +128,10 @@ func TestACPEndToEnd(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 
-	if _, err := clientConn.Initialize(ctx, sdk.InitializeRequest{ProtocolVersion: sdk.ProtocolVersion(sdk.ProtocolVersionNumber)}); err != nil {
+	if _, err := clientConn.Initialize(ctx, sdk.InitializeRequest{
+		ProtocolVersion:    sdk.ProtocolVersion(sdk.ProtocolVersionNumber),
+		ClientCapabilities: sdk.ClientCapabilities{Fs: sdk.FileSystemCapabilities{ReadTextFile: true}},
+	}); err != nil {
 		t.Fatalf("initialize: %v", err)
 	}
 	ns, err := clientConn.NewSession(ctx, sdk.NewSessionRequest{Cwd: "/tmp/work", McpServers: []sdk.McpServer{}})

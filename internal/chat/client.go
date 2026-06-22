@@ -3,6 +3,7 @@ package chat
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -132,8 +133,25 @@ func (c *Client) readLoop() {
 				c.emit(Event{Kind: KindMcpCall, McpCall: mc})
 			}
 		case "error":
-			c.emit(Event{Kind: KindError, ChatStream: ChatStream{Event: "error"}})
+			var fe FrameError
+			_ = decodePayload(data, &fe)
+			c.emit(Event{Kind: KindError, ChatStream: ChatStream{Event: "error"}, Err: frameErr(fe)})
 		}
+	}
+}
+
+// frameErr turns a server-sent error frame into a non-nil error, preferring the
+// "code: message" form and falling back gracefully when fields are absent.
+func frameErr(fe FrameError) error {
+	switch {
+	case fe.Code != "" && fe.Message != "":
+		return fmt.Errorf("%s: %s", fe.Code, fe.Message)
+	case fe.Message != "":
+		return errors.New(fe.Message)
+	case fe.Code != "":
+		return errors.New(fe.Code)
+	default:
+		return errors.New("server error")
 	}
 }
 

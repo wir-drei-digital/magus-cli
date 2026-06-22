@@ -4,6 +4,8 @@ package acp
 import (
 	"context"
 	"fmt"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,6 +34,7 @@ type Agent struct {
 
 	mu       sync.Mutex
 	editor   EditorConn
+	editorFS bool // editor advertised fs.readTextFile at Initialize
 	sessions map[string]*Session
 }
 
@@ -57,6 +60,13 @@ func (a *Agent) SetEditor(e EditorConn) {
 }
 
 func (a *Agent) Initialize(_ context.Context, req sdk.InitializeRequest) (sdk.InitializeResponse, error) {
+	// Record whether the editor can service local file reads. We only advertise
+	// read_file to the cloud if it can (see NewSession) — otherwise the cloud
+	// would propose a tool the editor cannot fulfil.
+	a.mu.Lock()
+	a.editorFS = req.ClientCapabilities.Fs.ReadTextFile
+	a.mu.Unlock()
+
 	return sdk.InitializeResponse{
 		ProtocolVersion:   sdk.ProtocolVersion(sdk.ProtocolVersionNumber),
 		AgentInfo:         &sdk.Implementation{Name: "magus"},
@@ -78,10 +88,22 @@ func (a *Agent) NewSession(ctx context.Context, req sdk.NewSessionRequest) (sdk.
 		return sdk.NewSessionResponse{}, fmt.Errorf("connect to magus: %w", err)
 	}
 
+	a.mu.Lock()
+	editor := a.editor
+	canRead := a.editorFS
+	a.mu.Unlock()
+
+	// Advertise read_file to the cloud only if the editor can service fs reads;
+	// otherwise the cloud would propose a tool the editor cannot fulfil.
+	var localTools []string
+	if canRead {
+		localTools = []string{"read_file"}
+	}
+
 	chatSID := newID()
 	if err := cloud.Send(chat.Hello{
 		SessionID:    chatSID,
-		Capabilities: chat.Capabilities{LocalTools: []string{"read_file"}},
+		Capabilities: chat.Capabilities{LocalTools: localTools},
 		Conversation: map[string]any{"new": true},
 	}); err != nil {
 		cloud.Close()
@@ -116,9 +138,10 @@ func (a *Agent) NewSession(ctx context.Context, req sdk.NewSessionRequest) (sdk.
 		return sdk.NewSessionResponse{}, fmt.Errorf("server_hello missing conversation_id")
 	}
 
-	a.mu.Lock()
-	editor := a.editor
-	a.mu.Unlock()
+	adv := make(map[string]bool, len(localTools))
+	for _, t := range localTools {
+		adv[t] = true
+	}
 
 	sess := &Session{
 		ID:      convID,
@@ -126,10 +149,13 @@ func (a *Agent) NewSession(ctx context.Context, req sdk.NewSessionRequest) (sdk.
 		Cloud:   cloud,
 		Editor:  editor,
 		Ctx:     context.Background(),
+		// Self-evict when the cloud connection closes so dead sessions don't
+		// linger in the map for the life of the (long-lived) acp process.
+		OnExit: func() { a.mu.Lock(); delete(a.sessions, convID); a.mu.Unlock() },
 		Exec: &Executor{
 			SessionID:  convID,
 			Editor:     editor,
-			Advertised: map[string]bool{"read_file": true},
+			Advertised: adv,
 			Ctx:        context.Background(),
 		},
 	}
@@ -141,32 +167,70 @@ func (a *Agent) NewSession(ctx context.Context, req sdk.NewSessionRequest) (sdk.
 	return sdk.NewSessionResponse{SessionId: sdk.SessionId(convID)}, nil
 }
 
-func (a *Agent) Prompt(_ context.Context, req sdk.PromptRequest) (sdk.PromptResponse, error) {
+func (a *Agent) Prompt(ctx context.Context, req sdk.PromptRequest) (sdk.PromptResponse, error) {
 	a.mu.Lock()
 	sess := a.sessions[string(req.SessionId)]
 	a.mu.Unlock()
 	if sess == nil {
 		return sdk.PromptResponse{}, sdk.NewInvalidParams("unknown session")
 	}
-	stop, err := sess.Prompt(promptText(req.Prompt))
+	if dropped := droppedBlockKinds(req.Prompt); len(dropped) > 0 {
+		fmt.Fprintf(os.Stderr, "magus acp: dropped %d unsupported prompt block(s): %v\n", len(dropped), dropped)
+	}
+	// Thread the SDK's per-request context so an editor session/cancel (which the
+	// SDK signals by cancelling this ctx) returns the prompt promptly.
+	stop, err := sess.Prompt(ctx, promptText(req.Prompt))
 	if err != nil {
 		return sdk.PromptResponse{}, err
 	}
 	return sdk.PromptResponse{StopReason: sdk.StopReason(stop)}, nil
 }
 
-// Cancel is a v1 no-op (no server cancel path yet); the turn runs to completion.
+// Cancel returns nil: the SDK cancels the per-request context on session/cancel,
+// which unblocks Session.Prompt (see Prompt). Interrupting the cloud-side turn
+// itself needs a server cancel frame (deferred to v-next), so the cloud finishes
+// the turn in the background.
 func (a *Agent) Cancel(_ context.Context, _ sdk.CancelNotification) error { return nil }
 
-// promptText concatenates the text content blocks of a prompt.
+// promptText builds the text forwarded to the cloud. Text blocks are
+// concatenated; resource_link blocks (ACP baseline, e.g. Zed @-mentions) are
+// forwarded as a textual reference so the cloud agent can read_file them.
 func promptText(blocks []sdk.ContentBlock) string {
-	var out string
-	for _, b := range blocks {
-		if b.Text != nil {
-			out += b.Text.Text
+	var b strings.Builder
+	for _, blk := range blocks {
+		switch {
+		case blk.Text != nil:
+			b.WriteString(blk.Text.Text)
+		case blk.ResourceLink != nil:
+			rl := blk.ResourceLink
+			if rl.Name != "" {
+				fmt.Fprintf(&b, "\n[referenced file: %s (%s)]\n", rl.Name, rl.Uri)
+			} else {
+				fmt.Fprintf(&b, "\n[referenced file: %s]\n", rl.Uri)
+			}
 		}
 	}
-	return out
+	return b.String()
+}
+
+// droppedBlockKinds lists prompt block kinds the bridge cannot forward (image,
+// audio, embedded resource). A conformant editor won't send these (we advertise
+// no matching promptCapabilities), but if one does we surface the silent loss.
+func droppedBlockKinds(blocks []sdk.ContentBlock) []string {
+	var kinds []string
+	for _, blk := range blocks {
+		switch {
+		case blk.Text != nil, blk.ResourceLink != nil:
+			// forwarded by promptText
+		case blk.Image != nil:
+			kinds = append(kinds, "image")
+		case blk.Audio != nil:
+			kinds = append(kinds, "audio")
+		case blk.Resource != nil:
+			kinds = append(kinds, "resource")
+		}
+	}
+	return kinds
 }
 
 // --- Unsupported methods (advertise nothing; reject cleanly) ----------------

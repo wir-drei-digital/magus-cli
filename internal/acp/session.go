@@ -23,6 +23,10 @@ type Session struct {
 	Exec    chat.Executor
 	Ctx     context.Context
 
+	// OnExit, if set, is called once when Run returns (i.e. the cloud
+	// connection closed) so the owner can evict this now-dead session.
+	OnExit func()
+
 	mu       sync.Mutex
 	turnDone chan turnResult
 }
@@ -34,6 +38,9 @@ type turnResult struct{ errMsg string }
 // completion to a waiting Prompt. Blocking on the executor (permission round-
 // trip) naturally pauses the stream — acceptable for v1's single in-flight tool.
 func (s *Session) Run() {
+	if s.OnExit != nil {
+		defer s.OnExit()
+	}
 	for ev := range s.Cloud.Events() {
 		switch ev.Kind {
 		case chat.KindChatStream:
@@ -51,16 +58,28 @@ func (s *Session) Run() {
 				_ = s.Cloud.Send(s.Exec.Handle(ev.McpCall))
 			}
 		case chat.KindClosed, chat.KindError:
-			s.signalTurn(turnResult{errMsg: "connection closed"})
+			s.signalTurn(turnResult{errMsg: closeMsg(ev)})
 		}
 	}
 	s.signalTurn(turnResult{errMsg: "connection closed"})
 }
 
+// closeMsg surfaces the real transport/server error (server_hello rejection,
+// protocol error, socket read error) instead of a generic "connection closed".
+func closeMsg(ev chat.Event) string {
+	if ev.Err != nil {
+		return ev.Err.Error()
+	}
+	return "connection closed"
+}
+
 // Prompt sends the user's text as a chat turn and blocks until the turn ends.
-// It rejects re-entrant calls while a turn is in flight, and unblocks if the
-// session context is cancelled before a terminal event arrives.
-func (s *Session) Prompt(text string) (string, error) {
+// It rejects re-entrant calls while a turn is in flight, and unblocks if ctx is
+// cancelled before a terminal event arrives. ctx is the SDK's per-request
+// context, which the SDK cancels on session/cancel — so an editor cancel
+// returns the prompt. (The cloud turn itself keeps running until it ends
+// naturally; interrupting it needs a server-side cancel frame, deferred to v-next.)
+func (s *Session) Prompt(ctx context.Context, text string) (string, error) {
 	s.mu.Lock()
 	if s.turnDone != nil {
 		s.mu.Unlock()
@@ -71,9 +90,7 @@ func (s *Session) Prompt(text string) (string, error) {
 	s.mu.Unlock()
 
 	if err := s.Cloud.Send(chat.Chat{SessionID: s.ChatSID, Text: text}); err != nil {
-		s.mu.Lock()
-		s.turnDone = nil
-		s.mu.Unlock()
+		s.clearTurn()
 		return "", err
 	}
 
@@ -83,12 +100,17 @@ func (s *Session) Prompt(text string) (string, error) {
 			return "", fmt.Errorf("turn ended: %s", res.errMsg)
 		}
 		return "end_turn", nil
-	case <-s.Ctx.Done():
-		s.mu.Lock()
-		s.turnDone = nil
-		s.mu.Unlock()
-		return "", s.Ctx.Err()
+	case <-ctx.Done():
+		s.clearTurn()
+		return "", ctx.Err()
 	}
+}
+
+// clearTurn resets the in-flight marker so the session can accept a later Prompt.
+func (s *Session) clearTurn() {
+	s.mu.Lock()
+	s.turnDone = nil
+	s.mu.Unlock()
 }
 
 func (s *Session) signalTurn(r turnResult) {

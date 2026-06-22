@@ -40,6 +40,11 @@ func TestNewSessionDialsAndMapsConversation(t *testing.T) {
 	a.SetEditor(&fakeEditor{})
 	a.Dial = func(_ context.Context, _, _, _ string) (CloudConn, error) { return cloud, nil }
 
+	// Editor advertises fs.readTextFile at Initialize, so read_file is offered.
+	_, _ = a.Initialize(context.Background(), sdk.InitializeRequest{
+		ClientCapabilities: sdk.ClientCapabilities{Fs: sdk.FileSystemCapabilities{ReadTextFile: true}},
+	})
+
 	// Feed the server_hello the NewSession handshake awaits.
 	cloud.events <- chat.Event{Kind: chat.KindServerHello, ChatStream: chat.ChatStream{}, ServerHello: chat.ServerHello{ConversationID: "conv-xyz", AcceptedTools: []string{"read_file"}}}
 
@@ -57,6 +62,32 @@ func TestNewSessionDialsAndMapsConversation(t *testing.T) {
 		h, ok := f.(chat.Hello)
 		if !ok || len(h.Capabilities.LocalTools) != 1 || h.Capabilities.LocalTools[0] != "read_file" {
 			t.Fatalf("expected hello advertising read_file, got %+v", f)
+		}
+	default:
+		t.Fatal("no hello frame sent")
+	}
+}
+
+func TestNewSessionWithoutFsAdvertisesNoLocalTools(t *testing.T) {
+	cloud := newFakeCloud()
+	a := New("tok", "https://magus.digital", "ua")
+	a.SetEditor(&fakeEditor{})
+	a.Dial = func(_ context.Context, _, _, _ string) (CloudConn, error) { return cloud, nil }
+
+	// No Initialize (or fs.readTextFile=false): the bridge must NOT advertise read_file.
+	cloud.events <- chat.Event{Kind: chat.KindServerHello, ServerHello: chat.ServerHello{ConversationID: "conv-1"}}
+
+	if _, err := a.NewSession(context.Background(), sdk.NewSessionRequest{Cwd: "/tmp"}); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	select {
+	case f := <-cloud.sent:
+		h, ok := f.(chat.Hello)
+		if !ok {
+			t.Fatalf("expected hello frame, got %+v", f)
+		}
+		if len(h.Capabilities.LocalTools) != 0 {
+			t.Errorf("expected no local tools when editor lacks fs, got %v", h.Capabilities.LocalTools)
 		}
 	default:
 		t.Fatal("no hello frame sent")
