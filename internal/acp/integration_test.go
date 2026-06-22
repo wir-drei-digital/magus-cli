@@ -32,9 +32,15 @@ func (s *stubEditor) RequestPermission(_ context.Context, _ sdk.RequestPermissio
 	}}, nil
 }
 func (s *stubEditor) SessionUpdate(_ context.Context, n sdk.SessionNotification) error {
-	// Accumulate any agent message text we can find by re-marshalling.
+	// Accumulate the streamed update's JSON so the test can assert the agent's
+	// text reached the editor end-to-end.
+	raw, err := json.Marshal(n.Update)
+	if err != nil {
+		return err
+	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.text.Write(raw)
+	s.mu.Unlock()
 	return nil
 }
 func (s *stubEditor) ReadTextFile(_ context.Context, p sdk.ReadTextFileRequest) (sdk.ReadTextFileResponse, error) {
@@ -141,9 +147,13 @@ func TestACPEndToEnd(t *testing.T) {
 	}
 	editor.mu.Lock()
 	readPath := editor.readPath
+	streamed := editor.text.String()
 	editor.mu.Unlock()
 	if readPath != "mix.exs" {
 		t.Errorf("editor was asked to read %q, want mix.exs", readPath)
+	}
+	if !strings.Contains(streamed, "the app module is App") {
+		t.Errorf("streamed text forwarded to editor = %q, want it to contain %q", streamed, "the app module is App")
 	}
 }
 

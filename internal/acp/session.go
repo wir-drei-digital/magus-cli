@@ -58,21 +58,37 @@ func (s *Session) Run() {
 }
 
 // Prompt sends the user's text as a chat turn and blocks until the turn ends.
+// It rejects re-entrant calls while a turn is in flight, and unblocks if the
+// session context is cancelled before a terminal event arrives.
 func (s *Session) Prompt(text string) (string, error) {
 	s.mu.Lock()
+	if s.turnDone != nil {
+		s.mu.Unlock()
+		return "", fmt.Errorf("a prompt turn is already in flight")
+	}
 	ch := make(chan turnResult, 1)
 	s.turnDone = ch
 	s.mu.Unlock()
 
 	if err := s.Cloud.Send(chat.Chat{SessionID: s.ChatSID, Text: text}); err != nil {
+		s.mu.Lock()
+		s.turnDone = nil
+		s.mu.Unlock()
 		return "", err
 	}
 
-	res := <-ch
-	if res.errMsg != "" {
-		return "", fmt.Errorf("turn ended: %s", res.errMsg)
+	select {
+	case res := <-ch:
+		if res.errMsg != "" {
+			return "", fmt.Errorf("turn ended: %s", res.errMsg)
+		}
+		return "end_turn", nil
+	case <-s.Ctx.Done():
+		s.mu.Lock()
+		s.turnDone = nil
+		s.mu.Unlock()
+		return "", s.Ctx.Err()
 	}
-	return "end_turn", nil
 }
 
 func (s *Session) signalTurn(r turnResult) {

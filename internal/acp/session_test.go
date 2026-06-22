@@ -3,6 +3,7 @@ package acp
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -60,6 +61,46 @@ func TestSessionPromptStreamsAndCompletes(t *testing.T) {
 
 	if len(ed.updates) == 0 {
 		t.Error("expected at least one session update forwarded to the editor")
+	}
+}
+
+func TestSessionPromptRejectsReentrantCall(t *testing.T) {
+	cloud := newFakeCloud()
+	ed := &fakeEditor{}
+	s := &Session{ID: "conv1", ChatSID: "sid1", Cloud: cloud, Editor: ed, Ctx: context.Background()}
+	go s.Run()
+
+	// First prompt: no turn.done is ever sent, so it stays in flight.
+	go func() { _, _ = s.Prompt("first") }()
+
+	// Wait for the first prompt's chat frame so we know its turnDone is set.
+	select {
+	case <-cloud.sent:
+	case <-time.After(time.Second):
+		t.Fatal("first prompt never sent a chat frame")
+	}
+
+	// Second prompt must be rejected promptly while the first is in flight.
+	type result struct {
+		sr  string
+		err error
+	}
+	got := make(chan result, 1)
+	go func() {
+		sr, err := s.Prompt("second")
+		got <- result{sr, err}
+	}()
+
+	select {
+	case r := <-got:
+		if r.err == nil {
+			t.Fatalf("second prompt should error while one is in flight, got sr=%q err=nil", r.sr)
+		}
+		if !strings.Contains(r.err.Error(), "already in flight") {
+			t.Errorf("error = %v, want it to mention \"already in flight\"", r.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("re-entrant prompt did not return promptly")
 	}
 }
 
