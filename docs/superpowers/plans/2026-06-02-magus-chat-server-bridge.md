@@ -113,7 +113,7 @@ git commit -m "feat(chat): add websock_adapter dep and CLI connection registry"
 - Create: `lib/magus/agents/tools/remote/read_file.ex`
 - Test: `test/magus/agents/tools/remote/read_file_test.exs`
 
-> Contract facts (verified): the ReAct runner invokes `run(params, context)` inside a `Task` with **`timeout: :infinity`** (no enforced wall-clock) and retries **only** `{:error, %{type: :timeout|:exception|:execution_error}}`. So this proxy self-enforces its timeout, **never raises**, and returns every failure as a terminal `{:ok, %{error: ...}}`. Params arrive string-keyed from the LLM; context uses atom keys (`Helpers.get_param/2` and `validate_context/2` handle both).
+> Contract facts (verified): the ReAct runner invokes `run(params, context)` inside a `Task.async_stream` with **`timeout: :infinity`**, AND `safe_execute_module/4` **discards** the per-tool `timeout_ms` it is handed (`runner.ex` ~1092-1093) — so there is **no enforced wall-clock at all**. The proxy's self-enforced timeout is therefore the *sole* bound; any future change that makes `safe_execute_module` honor `tool_timeout_ms` must keep it ≥ the proxy timeout. The runner retries **only** `{:error, %{type: :timeout|:exception|:execution_error}}`. So this proxy self-enforces its timeout, **never raises**, and returns every failure as a terminal `{:ok, %{error: ...}}`. Params arrive string-keyed from the LLM; context uses atom keys (`Helpers.get_param/2` and `validate_context/2` handle both).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -147,7 +147,7 @@ defmodule Magus.Agents.Tools.Remote.ReadFileTest do
   test "returns content on an ok result" do
     sid = "s-#{System.unique_integer([:positive])}"
     stub_handler(sid, fn from, call_id ->
-      send(from, {:mcp_result, call_id, "ok", %{"content" => "hello\nworld"}})
+      send(from, {:mcp_result, call_id, "ok", %{"content" => "hello\nworld"}, nil})
     end)
 
     assert {:ok, %{content: "hello\nworld", path: "a.txt"}} =
@@ -165,7 +165,7 @@ defmodule Magus.Agents.Tools.Remote.ReadFileTest do
 
   test "denied maps to a terminal error" do
     sid = "s-#{System.unique_integer([:positive])}"
-    stub_handler(sid, fn from, call_id -> send(from, {:mcp_result, call_id, "denied", %{}}) end)
+    stub_handler(sid, fn from, call_id -> send(from, {:mcp_result, call_id, "denied", %{}, nil}) end)
 
     assert {:ok, %{error: msg}} = ReadFile.run(%{"path" => "secret"}, %{caller_session_id: sid})
     assert msg =~ "denied"
@@ -257,17 +257,18 @@ defmodule Magus.Agents.Tools.Remote.ReadFile do
     send(handler, {:mcp_call, call_id, "read_file", %{path: path}, self()})
 
     receive do
-      {:mcp_result, ^call_id, "ok", result} ->
+      {:mcp_result, ^call_id, "ok", result, _error} ->
         Process.demonitor(ref, [:flush])
         {:ok, %{path: path, content: pick(result, "content"), truncated: pick(result, "truncated") || false}}
 
-      {:mcp_result, ^call_id, "denied", _result} ->
+      {:mcp_result, ^call_id, "denied", _result, _error} ->
         Process.demonitor(ref, [:flush])
         {:ok, %{error: "User denied access to #{path}.", hint: "Ask the user to approve, or choose another file."}}
 
-      {:mcp_result, ^call_id, "error", result} ->
+      {:mcp_result, ^call_id, "error", _result, error} ->
         Process.demonitor(ref, [:flush])
-        {:ok, %{error: "Could not read #{path}: #{pick(result, "message") || "read failed"}"}}
+        detail = pick(error || %{}, "message") || "read failed"
+        {:ok, %{error: "Could not read #{path}: #{detail}"}}
 
       {:DOWN, ^ref, :process, ^handler, _reason} ->
         {:ok, %{error: "Local connection dropped before #{path} could be read."}}
@@ -463,9 +464,15 @@ defmodule Magus.Agents.Tools.Remote.Injection do
   end
 
   defp append_local_tools(signal, names) do
-    case Catalog.resolve(names) do
-      [] -> signal
-      mods -> Map.update(signal, :tools, mods, fn existing -> Enum.uniq((existing || []) ++ mods) end)
+    case {Map.get(signal, :tools), Catalog.resolve(names)} do
+      # No-op unless the signal already carries a non-empty base :tools list.
+      # A non-tool model yields `[]` from build_tools/3, so appending here would
+      # make [ReadFile] the *entire* toolset for a model that cannot use tools.
+      {existing, mods} when is_list(existing) and existing != [] and mods != [] ->
+        Map.put(signal, :tools, Enum.uniq(existing ++ mods))
+
+      {_existing, _mods} ->
+        signal
     end
   end
 
@@ -480,6 +487,8 @@ defmodule Magus.Agents.Tools.Remote.Injection do
   defp get(data, key), do: Map.get(data, key) || Map.get(data, to_string(key))
 end
 ```
+
+> NOTE (`supports_tools?` interaction, verified in magus): `ToolBuilder.build_tools(_mode, _conv, false, ...)` returns `{[], %{}}` for a non-tool model (`lib/magus/agents/tools/tool_builder.ex` ~line 255), and `react_strategy.ex` uses `effective_tools = run_tools || config[:tools] || []` (~line 560). If `append_local_tools/2` unconditionally seeded `:tools` with `[ReadFile]`, a non-tool model would receive `read_file` as its entire toolset — a tool it cannot call. Gating the append on a pre-existing non-empty `:tools` list keeps the augment a strict no-op whenever the base agent decided the model gets no tools.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -818,7 +827,7 @@ git commit -m "feat(chat): ChatSocket hello — register, conversation, server_h
 - Modify: `lib/magus_web/cli/chat_socket.ex`
 - Test: `test/magus_web/cli/chat_socket_mcp_test.exs`
 
-> The proxy (Task 2) does `send(handler, {:mcp_call, call_id, tool, params, from_pid})`. The handler pushes the `mcp_call` frame and records `call_id => from_pid`. On the `mcp_result` frame it sends `{:mcp_result, call_id, status, result}` back to that pid. This closes the round-trip the proxy's `receive` is waiting on.
+> The proxy (Task 2) does `send(handler, {:mcp_call, call_id, tool, params, from_pid})`. The handler pushes the `mcp_call` frame and records `call_id => from_pid`. On the `mcp_result` frame it sends `{:mcp_result, call_id, status, result, error}` back to that pid (the 5th element carries the top-level `error{code,message}` for non-ok results). This closes the round-trip the proxy's `receive` is waiting on.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -858,7 +867,7 @@ defmodule MagusWeb.Cli.ChatSocketMcpTest do
       })
 
     assert {:ok, new_state} = ChatSocket.handle_in({frame, [opcode: :text]}, state)
-    assert_receive {:mcp_result, "call-1", "ok", %{"content" => "hello"}}
+    assert_receive {:mcp_result, "call-1", "ok", %{"content" => "hello"}, _error}
     refute Map.has_key?(new_state.pending, "call-1")
   end
 
@@ -885,13 +894,15 @@ In `lib/magus_web/cli/chat_socket.ex`, replace the placeholder `handle_mcp_resul
         {:ok, state}
 
       {waiter, pending} ->
-        send(waiter, {:mcp_result, call_id, msg["status"], msg["result"] || %{}})
+        send(waiter, {:mcp_result, call_id, msg["status"], msg["result"] || %{}, msg["error"]})
         {:ok, %{state | pending: pending}}
     end
   end
 
   defp handle_mcp_result(_msg, state), do: {:ok, state}
 ```
+
+> NOTE (error payload shape, per spec section 4): on failure the CLI puts the detail in a **top-level** `error{code, message}` sibling of `result`, not inside `result`. The server must forward `msg["error"]` alongside `msg["result"]`, and the proxy reads `error["message"]`/`error["code"]` (falling back to `"read failed"`). Reading `result["message"]` would always miss the failure detail.
 
 and
 
@@ -1031,6 +1042,10 @@ and add a `handle_info/2` clause for PubSub broadcasts (place it BEFORE the exis
 and the mapper + frame helper (near the other private helpers):
 
 ```elixir
+  # CAVEAT: use the BROADCAST field names below (error_message, triggering_message_id,
+  # output_summary), NOT SseStreamer's payload[:message] / payload[:message_id] reads —
+  # those keys do not exist on the agent's broadcasts and resolve to nil. SseStreamer
+  # itself has this latent bug; do not mirror its field access, only its structure.
   defp map_signal(%{type: "text.chunk"} = p), do: {"text.delta", %{"delta" => p[:delta], "message_id" => p[:message_id]}}
   defp map_signal(%{type: "text.complete"} = p), do: {"text.done", %{"text" => p[:text], "message_id" => p[:message_id]}}
   defp map_signal(%{type: "tool.start"} = p), do: {"tool.start", %{"event_id" => p[:event_id], "tool_name" => p[:tool_name], "inputs" => p[:inputs]}}
@@ -1072,7 +1087,7 @@ defmodule MagusWeb.Cli.ChatSocketChatTest do
     assert {:ok, _state} = ChatSocket.handle_in({frame, [opcode: :text]}, state)
 
     # The user message is persisted with our metadata (assert via the Chat read API).
-    messages = Magus.Chat.list_messages!(conv.id, actor: user)
+    messages = Magus.Chat.message_history!(conv.id, actor: user) |> Enum.to_list()
     user_msg = Enum.find(messages, &(&1.role == :user and &1.text == "hi there"))
     assert user_msg
     assert user_msg.metadata["caller_session_id"] == "s-1"
@@ -1081,7 +1096,7 @@ defmodule MagusWeb.Cli.ChatSocketChatTest do
 end
 ```
 
-> NOTE: confirm the exact message-read interface (`Magus.Chat.list_messages!/2` or equivalent) against `lib/magus/chat/chat.ex`; adjust the read call if the code interface differs. The async agent dispatch may run without an LLM expectation — if it logs a Mox error, add a benign stub: `expect(Magus.Test.Mocks.LLMMock, :chat, fn _, _, _ -> Magus.Test.Mocks.mock_stream_response("ok") end)` (see `test/support/mocks.ex` for the exact builder name/arity).
+> NOTE: the read interface is `Magus.Chat.message_history!` (code interface `:message_history`, action `:for_conversation`, verified in `lib/magus/chat/chat.ex:138`); `list_messages!` does not exist. It returns an Ash keyset page, so pipe through `Enum.to_list()` before `Enum.find` (as above). The async agent dispatch may run without an LLM expectation — if it logs a Mox error, add a benign stub: `expect(Magus.Test.Mocks.LLMMock, :chat, fn _, _, _ -> Magus.Test.Mocks.mock_stream_response("ok") end)` (see `test/support/mocks.ex` for the exact builder name/arity).
 
 - [ ] **Step 6: Run the chat test to verify it passes**
 
@@ -1217,14 +1232,14 @@ defmodule Magus.Agents.Tools.Remote.NoPersistTest do
     # Base tools are empty in the agent definition; local tools only ever arrive
     # per-turn via run_tools, so a thawed agent (restored from base config)
     # cannot expose read_file without a live connection re-injecting it.
-    strategy_opts = Magus.Agents.ConversationAgent.__jido_strategy_opts__()
+    strategy_opts = Magus.Agents.ConversationAgent.strategy_opts()
     base_tools = Keyword.get(strategy_opts, :tools, [])
     refute Magus.Agents.Tools.Remote.ReadFile in base_tools
   end
 end
 ```
 
-> NOTE: confirm the accessor for the agent's compiled strategy opts. If `__jido_strategy_opts__/0` is not exported by `use Jido.Agent`, assert against the source instead: read `lib/magus/agents/conversation_agent.ex` and assert the `tools: []` in the strategy config — or grep-assert no `Remote.` module appears in the agent's `plugins`/strategy block. The guarantee is structural (base toolset is empty), so a source-level assertion is acceptable.
+> NOTE: `strategy_opts/0` is the accessor exported by `use Jido.Agent` (verified — used in `test/magus/agents/conversation_agent_test.exs:18`); `__jido_strategy_opts__/0` does not exist. It returns the compiled strategy opts; assert `Keyword.get(strategy_opts, :tools, [])` contains no `Remote.` module. The guarantee is structural (base toolset is empty), so a source-level assertion against `conversation_agent.ex` `tools: []` is an equivalent fallback.
 
 - [ ] **Step 2: Run it**
 

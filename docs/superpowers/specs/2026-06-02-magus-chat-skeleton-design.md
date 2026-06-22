@@ -103,10 +103,25 @@ JSON text frames over WSS. Every frame has `type` and protocol version `v` (int)
 | `chat_stream` | srv→CLI | streamed output + lifecycle | `event`: `text.delta`/`text.done`/`tool.start`/`tool.complete`/`turn.done`/`error`; `data` |
 | `mcp_call` | srv→CLI | tool invocation request | `call_id`, `tool_name`, `params` |
 | `mcp_result` | CLI→srv | tool result | `call_id`, `status`: `ok`/`error`/`denied`; `result` or `error:{code,message}` |
+| `error` | srv→CLI | transport/protocol error (auth/forbidden/bad_frame/hello rejection) | `code`, `message` (plus `v`) |
+
+> **Two distinct error surfaces.** The top-level `error` frame above is a transport/protocol-level failure (auth, forbidden, malformed frame, `hello` rejection) and is **not** the same as `chat_stream{event:"error"}`, which reports an in-turn agent/stream error.
+
+**`chat_stream.data` keys per event:**
+
+- `text.delta` → `{delta, message_id}`
+- `text.done` → `{text, message_id}`
+- `tool.start` → `{event_id, tool_name, inputs}`
+- `tool.complete` → `{event_id, tool_name, status, summary}`
+- `turn.done` → `{message_id}`
+- `error` → `{message}`
+
+The canonical summary key on the wire is **`summary`**. (The internal magus signal field is `output_summary`; the forwarder maps `output_summary` → `summary` when encoding `tool.complete`.)
 
 - `chat_stream` events map from the existing PubSub signals on `agents:{conversation_id}` (verify exact signal names/payloads — §8).
+- **`mcp_result` error vs result:** for a non-`ok` `mcp_result`, the failure detail lives in a **top-level `error:{code,message}` sibling of `result`** (`result` is omitted), not inside `result`. The server **must** consume `error{}` for `error`/`denied` statuses (never `result.message`).
 - Heartbeat: WS ping/pong (lib-level), CLI pings ~25s.
-- **Schema source of truth (v1):** one shared protocol section in this doc, hand-mirrored as Go structs and Elixir structs. Codegen is premature for 6 message types.
+- **Schema source of truth (v1):** one shared protocol section in this doc, hand-mirrored as Go structs and Elixir structs. Codegen is premature for this handful of frame types.
 
 ---
 
@@ -183,7 +198,7 @@ Tool risk tiers: *read* (`read_file`, `list_files`, `grep`) · *write* (`write_f
 
 | Module | Responsibility |
 |---|---|
-| upgrade plug | extract Bearer → validate (reuse `ApiTokenAuthPlug` logic) → assign user/scope/workspace or halt `401`; then `WebSockAdapter.upgrade` |
+| upgrade plug | extract Bearer → validate (reuse `ApiTokenAuthPlug` logic) → assign `current_user` + `current_token` (the token carries scope as an attribute and a loaded workspace via the `:get_by_hash` action) or halt `401`; then `WebSockAdapter.upgrade` |
 | `MagusWeb.ChatSocket` (WebSock) | `handle_in`: `hello` → create/load conversation + register session in Registry + reply `server_hello`; `chat` → drive a turn (inject `run_tools` + `run_tool_context`); `mcp_result` → reply to the waiting proxy. `handle_info`: PubSub `agents:{id}` → encode `chat_stream`; `{:mcp_call,…}` from a proxy → push. `terminate`: drop Registry binding |
 | connection `Registry` | `caller_session_id → connection pid`; the proxy looks up the socket, the socket holds `call_id → from` to reply on `mcp_result`. Bind to **pid** → fail-closed if absent. Monitor the pid so a `:DOWN` aborts in-flight calls |
 | `Magus.Agents.Tools.Remote.ReadFile` | proxy `Jido.Action` (`name: "read_file"`, real `path` schema). `run(%{path}, ctx)`: `ctx.caller_session_id` → Registry → handler pid; no conn → immediate terminal error; else `send(handler, {:mcp_call, …, self()})` + `receive … after @timeout` (the proxy **self-enforces** the timeout — the runner does **not**: `Task.async_stream` is `timeout: :infinity` and discards the per-tool timeout); `Process.monitor` the handler so a `:DOWN` aborts the wait. Map `denied`/timeout/no-conn to **terminal** `{:ok, %{error: …}}` (never raise). **Relays only — enforces no policy** (the CLI does) |
