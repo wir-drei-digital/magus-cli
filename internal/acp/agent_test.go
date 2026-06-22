@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	sdk "github.com/coder/acp-go-sdk"
 
@@ -68,6 +69,49 @@ func TestNewSessionDialErrorPropagates(t *testing.T) {
 	a.Dial = func(_ context.Context, _, _, _ string) (CloudConn, error) { return nil, errors.New("dial boom") }
 	if _, err := a.NewSession(context.Background(), sdk.NewSessionRequest{Cwd: "/tmp"}); err == nil {
 		t.Fatal("expected dial error to propagate")
+	}
+}
+
+func TestNewSessionTimesOutWaitingForServerHello(t *testing.T) {
+	// Cloud completes the dial but never sends server_hello and never closes;
+	// NewSession must fail promptly via the bounded handshake timeout rather
+	// than blocking forever on the events channel.
+	orig := handshakeTimeout
+	handshakeTimeout = 20 * time.Millisecond
+	defer func() { handshakeTimeout = orig }()
+
+	cloud := newFakeCloud() // events channel is empty and stays open
+	a := New("tok", "https://magus.digital", "ua")
+	a.SetEditor(&fakeEditor{})
+	a.Dial = func(_ context.Context, _, _, _ string) (CloudConn, error) { return cloud, nil }
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := a.NewSession(context.Background(), sdk.NewSessionRequest{Cwd: "/tmp"})
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected a timeout error when server_hello is never sent")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("NewSession hung waiting for server_hello")
+	}
+}
+
+func TestNewSessionEmptyConversationIDIsError(t *testing.T) {
+	cloud := newFakeCloud()
+	a := New("tok", "https://magus.digital", "ua")
+	a.SetEditor(&fakeEditor{})
+	a.Dial = func(_ context.Context, _, _, _ string) (CloudConn, error) { return cloud, nil }
+
+	// server_hello with an empty conversation id must be rejected.
+	cloud.events <- chat.Event{Kind: chat.KindServerHello, ServerHello: chat.ServerHello{ConversationID: ""}}
+
+	if _, err := a.NewSession(context.Background(), sdk.NewSessionRequest{Cwd: "/tmp"}); err == nil {
+		t.Fatal("expected an error when server_hello carries an empty conversation_id")
 	}
 }
 

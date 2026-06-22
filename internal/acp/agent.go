@@ -5,11 +5,16 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	sdk "github.com/coder/acp-go-sdk"
 
 	"github.com/wir-drei-digital/magus-cli/internal/chat"
 )
+
+// handshakeTimeout bounds how long NewSession waits for the cloud's server_hello
+// after the WS upgrade completes. Package-level so tests can shorten it.
+var handshakeTimeout = 30 * time.Second
 
 // Compile-time assertion that *Agent satisfies the SDK's Agent interface. This
 // surfaces any drift in the method set / stub signatures here, rather than only
@@ -84,12 +89,32 @@ func (a *Agent) NewSession(ctx context.Context, req sdk.NewSessionRequest) (sdk.
 	}
 
 	// Await server_hello (first inbound event) to learn the conversation id.
-	ev, ok := <-cloud.Events()
-	if !ok || ev.Kind != chat.KindServerHello {
+	// Bound the wait: a server that upgrades the WS but never sends server_hello
+	// (and never closes) must not hang session creation or leak the connection.
+	timer := time.NewTimer(handshakeTimeout)
+	defer timer.Stop()
+
+	var ev chat.Event
+	select {
+	case e, ok := <-cloud.Events():
+		if !ok || e.Kind != chat.KindServerHello {
+			cloud.Close()
+			return sdk.NewSessionResponse{}, fmt.Errorf("did not receive server_hello")
+		}
+		ev = e
+	case <-ctx.Done():
 		cloud.Close()
-		return sdk.NewSessionResponse{}, fmt.Errorf("did not receive server_hello")
+		return sdk.NewSessionResponse{}, fmt.Errorf("awaiting server_hello: %w", ctx.Err())
+	case <-timer.C:
+		cloud.Close()
+		return sdk.NewSessionResponse{}, fmt.Errorf("timed out awaiting server_hello")
 	}
+
 	convID := ev.ServerHello.ConversationID
+	if convID == "" {
+		cloud.Close()
+		return sdk.NewSessionResponse{}, fmt.Errorf("server_hello missing conversation_id")
+	}
 
 	a.mu.Lock()
 	editor := a.editor
