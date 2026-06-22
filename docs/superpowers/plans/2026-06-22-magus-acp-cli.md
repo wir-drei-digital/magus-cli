@@ -475,18 +475,20 @@ func TestClientRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sawHello := false
+	// Drive the exchange until we've replied to the mcp_call. Breaking on
+	// server_hello alone would exit before the mcp_call event is handled.
+	sentResult := false
 	for ev := range cli.Events() {
 		switch ev.Kind {
 		case KindServerHello:
-			sawHello = true
 			if ev.ServerHello.ConversationID != "conv1" {
 				t.Errorf("bad conversation id: %q", ev.ServerHello.ConversationID)
 			}
 		case KindMcpCall:
 			_ = cli.Send(McpResult{CallID: ev.McpCall.CallID, Status: "ok", Result: map[string]any{"content": "hi"}})
+			sentResult = true
 		}
-		if sawHello {
+		if sentResult {
 			break
 		}
 	}
