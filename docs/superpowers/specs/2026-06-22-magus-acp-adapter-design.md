@@ -14,7 +14,7 @@ Repos:
 - `magus-cli` — `/Users/daniel/Development/magus-cli` (Go 1.26, cobra). All ACP work lives here.
 - `magus` — `/Users/daniel/Development/magus` (Phoenix/LiveView, Ash, Jido agents). The cloud app. **No ACP-specific server work for this skeleton** (see §10).
 
-Reference: Agent Client Protocol — <https://agentclientprotocol.com>. Go SDK candidate: `github.com/coder/acp-go-sdk`.
+Reference: Agent Client Protocol — <https://agentclientprotocol.com>. Go SDK: `github.com/coder/acp-go-sdk` **v0.13.5** (latest; ACP protocol version 1 — verified current 2026-07-26, see §12).
 
 ---
 
@@ -286,18 +286,25 @@ The terminal TUI (rest of chat Plan 2) is independent and can be built in parall
 
 ---
 
-## 12. Library choice (eval first)
+## 12. Library choice — RESOLVED: `coder/acp-go-sdk` (eval passed)
 
-Default: **`github.com/coder/acp-go-sdk`** — typed agent/client plumbing, agent-side
-connection helper (`acp.NewAgentSideConnection`), extension-method support. A short eval
-task **precedes** implementation and must confirm:
+Shipped on **`github.com/coder/acp-go-sdk` v0.13.5** — typed agent/client plumbing,
+agent-side connection helper (`acp.NewAgentSideConnection`), extension-method support.
+The eval confirmed everything the plan needed (all method surfaces with usable Go
+types; the `Agent` interface shape is compile-asserted in `agent.go`).
 
-- It exposes `initialize`, `session/new`, `session/prompt`, outbound `session/update`, `session/request_permission`, and `fs/read_text_file` with usable Go types.
-- It tracks a current ACP protocol version compatible with Zed's client.
-- Its `Agent` interface shape (so §9 method names are pinned).
+**Protocol currency (verified 2026-07-26):** v0.13.5 is the latest SDK release, and
+ACP **protocol version 1** is the current MAJOR version — new features (e.g.
+`session/delete`, additional workspace roots, richer content types) arrive as
+*capabilities*, not version bumps, so staying on version 1 is current, not lagging.
+Version negotiation: the agent always answers with its latest supported version (1),
+which is the specified behavior when a client requests a version the agent lacks
+(tested in `TestInitializeNegotiatesUnsupportedVersionDown`). `session/delete` is
+behind the SDK's optional `AgentExperimental` interface and gated on a
+`sessionCapabilities.delete` we do not advertise — correctly absent, not missing.
 
-Fallbacks if the eval fails: `github.com/ironpark/acp-go` (unofficial), or a hand-rolled
-JSON-RPC-over-stdio handler — the method surface is small (~5 we implement + 2 we call).
+(Original fallbacks, kept for the record: `github.com/ironpark/acp-go` (unofficial),
+or a hand-rolled JSON-RPC-over-stdio handler.)
 
 ---
 
@@ -332,7 +339,7 @@ JSON-RPC-over-stdio handler — the method surface is small (~5 we implement + 2
 
 ## 15. Open questions / risks
 
-- **SDK maturity & protocol currency** — the §12 eval is the gate; everything downstream assumes it passes.
+- **SDK maturity & protocol currency** — *resolved.* Eval passed; shipped on v0.13.5 (latest) at protocol version 1 (current MAJOR — see §12, verified 2026-07-26). Re-check the SDK releases when picking up new capabilities (e.g. a future `session/delete`).
 - **Cancellation** — *partially addressed.* An editor `session/cancel` now returns the local `session/prompt` promptly (the per-request ctx unblocks `Session.Prompt`). The **cloud-side turn is still not interruptible mid-flight** — that needs a server cancel frame, which remains deferred. Revisit with the `write_file`/terminal tools where long-running ops make a true interrupt matter more.
 - **`resource_link` prompt blocks** — *addressed.* Forwarded to the cloud as a textual reference so the cloud can `read_file` them (§5). `image`/`audio`/embedded-`resource` blocks are dropped with a stderr diagnostic; richer multimodal forwarding stays out of scope.
 - **fs capability gating** — *addressed.* `read_file` is advertised only when the editor reported `fs.readTextFile` at `initialize`; an editor without it gets an empty local-tool set (graceful degrade) rather than a tool the bridge cannot service.

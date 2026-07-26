@@ -26,6 +26,23 @@ func TestInitializeReportsVersionAndName(t *testing.T) {
 	}
 }
 
+func TestInitializeNegotiatesUnsupportedVersionDown(t *testing.T) {
+	// ACP negotiation: if the agent does not support the client's requested
+	// version, it must answer with its own latest supported version (the
+	// client then decides whether to proceed). We support exactly version 1,
+	// so any request — older or newer — must be answered with 1.
+	a := New("tok", "https://magus.digital", "ua")
+	for _, requested := range []int{0, sdk.ProtocolVersionNumber, 99} {
+		resp, err := a.Initialize(context.Background(), sdk.InitializeRequest{ProtocolVersion: sdk.ProtocolVersion(requested)})
+		if err != nil {
+			t.Fatalf("Initialize(v=%d): %v", requested, err)
+		}
+		if int(resp.ProtocolVersion) != sdk.ProtocolVersionNumber {
+			t.Errorf("Initialize(v=%d) answered %d, want %d", requested, resp.ProtocolVersion, sdk.ProtocolVersionNumber)
+		}
+	}
+}
+
 func TestNewSessionWithoutTokenIsAuthRequired(t *testing.T) {
 	a := New("", "https://magus.digital", "ua")
 	_, err := a.NewSession(context.Background(), sdk.NewSessionRequest{Cwd: "/tmp"})
