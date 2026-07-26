@@ -18,7 +18,13 @@ func MapStream(cs chat.ChatStream) (sdk.SessionUpdate, bool) {
 		return sdk.SessionUpdate{}, false
 	case "tool.start":
 		id := sdk.ToolCallId(str(cs.Data["event_id"]))
-		return sdk.StartToolCall(id, toolTitle(cs.Data), sdk.WithStartStatus(sdk.ToolCallStatusInProgress)), true
+		opts := []sdk.ToolCallStartOpt{sdk.WithStartStatus(sdk.ToolCallStatusInProgress)}
+		// Tag the local read tool with its ACP kind so editors render read-
+		// specific UI; other (cloud-side) tools stay generic in v1.
+		if str(cs.Data["tool_name"]) == "read_file" {
+			opts = append(opts, sdk.WithStartKind(sdk.ToolKindRead))
+		}
+		return sdk.StartToolCall(id, toolTitle(cs.Data), opts...), true
 	case "tool.complete":
 		id := sdk.ToolCallId(str(cs.Data["event_id"]))
 		return sdk.UpdateToolCall(id, sdk.WithUpdateStatus(toolStatus(cs.Data))), true
@@ -28,12 +34,18 @@ func MapStream(cs chat.ChatStream) (sdk.SessionUpdate, bool) {
 }
 
 // TurnEnd reports whether the event ends the prompt turn, with any error message.
+// An empty message is the success sentinel in Session.Prompt, so an error event
+// must ALWAYS yield a non-empty message — otherwise a malformed cloud error
+// would surface as a successful end_turn.
 func TurnEnd(cs chat.ChatStream) (bool, string) {
 	switch cs.Event {
 	case "turn.done":
 		return true, ""
 	case "error":
-		return true, str(cs.Data["message"])
+		if m := str(cs.Data["message"]); m != "" {
+			return true, m
+		}
+		return true, "cloud turn failed"
 	default:
 		return false, ""
 	}

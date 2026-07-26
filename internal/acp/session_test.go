@@ -104,27 +104,28 @@ func TestSessionPromptRejectsReentrantCall(t *testing.T) {
 	}
 }
 
-func TestSessionPromptUnblocksOnContextCancel(t *testing.T) {
+func TestSessionCancelledTurnDrainsBeforeNextPrompt(t *testing.T) {
+	// The SDK cancels the prior prompt's ctx whenever a new session/prompt
+	// arrives, so a cancelled turn's cloud terminal event must never complete
+	// a LATER prompt. The session drains the stale turn first.
 	cloud := newFakeCloud()
 	ed := &fakeEditor{}
 	s := &Session{ID: "conv1", ChatSID: "sid1", Cloud: cloud, Editor: ed, Ctx: context.Background()}
 	go s.Run()
 
+	// Prompt A: in flight, then cancelled locally (cloud turn keeps running).
 	ctx, cancel := context.WithCancel(context.Background())
 	got := make(chan error, 1)
 	go func() {
-		_, err := s.Prompt(ctx, "hello")
+		_, err := s.Prompt(ctx, "first")
 		got <- err
 	}()
-
-	// Wait for the chat frame so the turn is in flight, then cancel the context.
 	select {
 	case <-cloud.sent:
 	case <-time.After(time.Second):
-		t.Fatal("prompt never sent a chat frame")
+		t.Fatal("prompt A never sent a chat frame")
 	}
 	cancel()
-
 	select {
 	case err := <-got:
 		if err == nil {
@@ -134,12 +135,50 @@ func TestSessionPromptUnblocksOnContextCancel(t *testing.T) {
 		t.Fatal("Prompt did not unblock on context cancel")
 	}
 
-	// After a cancelled turn, a fresh Prompt must be accepted (turnDone cleared).
-	go func() { _, _ = s.Prompt(context.Background(), "again") }()
+	// Prompt B while A is draining: rejected — A's eventual turn.done must not
+	// be able to complete B.
+	if _, err := s.Prompt(context.Background(), "second"); err == nil {
+		t.Fatal("prompt while the cancelled turn is draining must be rejected")
+	} else if !strings.Contains(err.Error(), "still completing") {
+		t.Errorf("draining rejection = %v, want it to mention \"still completing\"", err)
+	}
+
+	// A's stale terminal event arrives: drains the cancelled turn. Wait for the
+	// pump to process it (draining cleared) before prompting again.
+	cloud.events <- chat.Event{Kind: chat.KindChatStream, ChatStream: chat.ChatStream{Event: "turn.done"}}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		s.mu.Lock()
+		d := s.draining
+		s.mu.Unlock()
+		if !d {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("draining never cleared after the stale turn.done")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Prompt C is now accepted and completes only on ITS OWN terminal event.
+	res := make(chan string, 1)
+	go func() {
+		sr, _ := s.Prompt(context.Background(), "third")
+		res <- sr
+	}()
 	select {
 	case <-cloud.sent:
-	case <-time.After(time.Second):
-		t.Fatal("a new prompt after cancel was rejected (turnDone not cleared)")
+	case <-time.After(2 * time.Second):
+		t.Fatal("prompt C was not accepted after the stale turn drained")
+	}
+	cloud.events <- chat.Event{Kind: chat.KindChatStream, ChatStream: chat.ChatStream{Event: "turn.done"}}
+	select {
+	case sr := <-res:
+		if sr != "end_turn" {
+			t.Errorf("prompt C stopReason = %q, want end_turn", sr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("prompt C never completed")
 	}
 }
 

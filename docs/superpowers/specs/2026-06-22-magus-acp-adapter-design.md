@@ -134,7 +134,8 @@ method names/signatures are pinned by the **library eval** (§12); the ACP metho
   capabilities (plain text for v1) and report whether auth is satisfied (§8).
 - `session/new` — create a session: dial the cloud, `hello{conversation:{new}}`, return a `sessionId`.
 - `session/prompt` — forward the user's prompt to the cloud as `chat{text}`; resolve when the turn completes (§5).
-- `session/cancel` (notification) — the SDK cancels the per-request context, which unblocks the in-flight `session/prompt` so it returns promptly; the cloud-side turn still runs to completion (a true mid-turn interrupt needs a server cancel frame, deferred) (§13).
+- `session/cancel` (notification) — the SDK cancels the per-request context, which unblocks the in-flight `session/prompt` so it returns promptly (`stopReason: cancelled`). The cloud-side turn still runs to completion (a true mid-turn interrupt needs a server cancel frame, deferred); until its terminal event arrives the session is **draining** and a new `session/prompt` is rejected with a clear error — the stale turn's `turn.done` can never complete a later prompt. Note the SDK also cancels the prior prompt whenever a **new** `session/prompt` arrives on the same session, so draining is reachable in normal flow (§13).
+- `session/close` — implemented and advertised (`sessionCapabilities.close`): removes the session, closes its cloud WS (which unblocks any in-flight prompt and ends the pump), and frees its resources.
 - `authenticate`, `session/load`, `session/set_mode`, `logout` — **not implemented** in v1 (return the SDK's not-supported error / omit from capabilities).
 
 **Client-side (we call; the editor handles):**
@@ -250,7 +251,7 @@ Follows the existing `internal/` layout and reuses `internal/chat` verbatim.
 | Package / file | Responsibility |
 |---|---|
 | `internal/cli/acp.go` (create) + `root.go` (modify) | `magus acp` command; load profile + token; build the stdio ACP connection; flags `--profile` (global), `--api-url` (global) |
-| `internal/acp/agent.go` (create) | implements the SDK `Agent` interface: `Initialize` (records `fs.readTextFile`), `NewSession` (advertises `read_file` only if the editor can service reads), `Prompt` (threads the per-request ctx; logs dropped prompt blocks), `Cancel` (relies on ctx cancellation) |
+| `internal/acp/agent.go` (create) | implements the SDK `Agent` interface: `Initialize` (records `fs.readTextFile`; advertises `sessionCapabilities.close`), `NewSession` (advertises `read_file` only if the editor can service reads), `Prompt` (threads the per-request ctx; logs dropped prompt blocks), `Cancel` (relies on ctx cancellation), `CloseSession` (disposes session + cloud WS) |
 | `internal/acp/session.go` (create) | per-session state: `sessionId`↔`conversation_id`, the session's `chat.Client`, the pending-prompt resolver; the `Run` pump self-evicts the session from the agent map on exit (`OnExit`) |
 | `internal/acp/stream.go` (create) | pure `chat_stream` → `session/update` mapping (table in §6) |
 | `internal/acp/executor.go` (create) | `acp.Executor` implementing `localtool.Executor`: the §7 pipeline (gate → permission → `fs/read_text_file` → result) |
@@ -314,7 +315,10 @@ or a hand-rolled JSON-RPC-over-stdio handler.)
 - **Cloud WS dial fails** (in `session/new`): return a `session/new` error; the editor shows it.
 - **Permission denied / cancelled:** `tool_call_update{failed}` + `mcp_result{denied}`; the cloud turn adapts (the chat skeleton already marks denials non-retryable).
 - **Editor `fs/read_text_file` error** (missing file, outside workspace): `mcp_result{error}` with the editor's message; the turn continues.
-- **`session/cancel` in v1:** the SDK cancels the prompt's per-request context, and `Session.Prompt` selects on it — so an editor cancel returns the pending `session/prompt` promptly. The **cloud-side turn still runs to completion**: interrupting it needs a server cancel frame (deferred). A hard editor cancel may also drop the WS, which fails any in-flight `mcp_call` closed-side. Documented limitation.
+- **`session/cancel` in v1:** the SDK cancels the prompt's per-request context, and `Session.Prompt` selects on it — so an editor cancel returns the pending `session/prompt` promptly. The **cloud-side turn still runs to completion**: interrupting it needs a server cancel frame (deferred). Until the cancelled turn's terminal event arrives the session **drains**: a new prompt is rejected ("previous (cancelled) turn is still completing"), which guarantees the stale `turn.done` can never resolve a later prompt (the server is single-flight per conversation, so the next terminal event always belongs to the cancelled turn). A hard editor cancel may also drop the WS, which fails any in-flight `mcp_call` closed-side and clears the drain.
+- **`session/close`:** disposes the session (map removal + cloud WS close). Close implies cancel per ACP: an in-flight prompt unblocks via the connection-closed path.
+- **Malformed cloud `error` event** (missing/empty `message`): `TurnEnd` substitutes a non-empty fallback ("cloud turn failed") so it can never masquerade as a successful `end_turn`.
+- **Protocol-version mismatch on an inbound frame:** the chat client validates the `{type, v}` envelope; a parseable frame with the wrong `v` surfaces as a descriptive error (and fails the handshake fast) instead of being processed as v1; undecodable frames are dropped.
 - **WS drop mid-turn:** the pending `session/prompt` resolves with an error; the conversation is persisted server-side, so the user can re-prompt. (Resume is `session/load`, deferred.)
 - **Unknown/unadvertised tool from cloud:** `denied` (known-tool gate).
 - **`resource_link` prompt blocks:** forwarded to the cloud as a textual reference (`[referenced file: …]`) so the cloud can `read_file` them (§5).
@@ -340,7 +344,7 @@ or a hand-rolled JSON-RPC-over-stdio handler.)
 ## 15. Open questions / risks
 
 - **SDK maturity & protocol currency** — *resolved.* Eval passed; shipped on v0.13.5 (latest) at protocol version 1 (current MAJOR — see §12, verified 2026-07-26). Re-check the SDK releases when picking up new capabilities (e.g. a future `session/delete`).
-- **Cancellation** — *partially addressed.* An editor `session/cancel` now returns the local `session/prompt` promptly (the per-request ctx unblocks `Session.Prompt`). The **cloud-side turn is still not interruptible mid-flight** — that needs a server cancel frame, which remains deferred. Revisit with the `write_file`/terminal tools where long-running ops make a true interrupt matter more.
+- **Cancellation** — *mostly addressed.* An editor `session/cancel` returns the local `session/prompt` promptly with `stopReason: cancelled`, and the session then **drains** the cancelled turn (new prompts rejected until its terminal event arrives), so a stale `turn.done` can never complete a later prompt. The **cloud-side turn is still not interruptible mid-flight** — that needs a server cancel frame, which remains deferred; it would also shorten the drain window. Revisit with the `write_file`/terminal tools where long-running ops make a true interrupt matter more.
 - **`resource_link` prompt blocks** — *addressed.* Forwarded to the cloud as a textual reference so the cloud can `read_file` them (§5). `image`/`audio`/embedded-`resource` blocks are dropped with a stderr diagnostic; richer multimodal forwarding stays out of scope.
 - **fs capability gating** — *addressed.* `read_file` is advertised only when the editor reported `fs.readTextFile` at `initialize`; an editor without it gets an empty local-tool set (graceful degrade) rather than a tool the bridge cannot service.
 - **Permission granularity** — ACP offers allow-once/always/reject-once/always; v1 maps only allow-once/reject. Persisting "allow always" into a CLI allowlist (bridging to `[chat.permissions]`) is deferred.

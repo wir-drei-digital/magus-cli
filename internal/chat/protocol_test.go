@@ -42,6 +42,37 @@ func TestExecutorInterfaceSatisfied(t *testing.T) {
 	var _ Executor = stubExec{}
 }
 
+func TestDecodeHead(t *testing.T) {
+	cases := []struct {
+		name     string
+		in       string
+		wantTyp  string // "" means the frame must be treated as undecodable
+		wantErr  bool
+		protoErr bool // error WITH a decoded type = protocol error worth surfacing
+	}{
+		{"valid v1", `{"type":"chat_stream","v":1}`, "chat_stream", false, false},
+		{"missing v", `{"type":"chat_stream"}`, "chat_stream", true, true},
+		{"wrong v", `{"type":"chat_stream","v":2}`, "chat_stream", true, true},
+		{"string v", `{"type":"chat_stream","v":"1"}`, "", true, false},
+		{"missing type", `{"v":1}`, "", true, false},
+		{"garbage", `not json`, "", true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			typ, err := decodeHead([]byte(tc.in))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr=%v", err, tc.wantErr)
+			}
+			if typ != tc.wantTyp {
+				t.Errorf("typ = %q, want %q", typ, tc.wantTyp)
+			}
+			if tc.protoErr && (typ == "" || err == nil) {
+				t.Errorf("expected a surfaced protocol error (typ+err), got typ=%q err=%v", typ, err)
+			}
+		})
+	}
+}
+
 type stubExec struct{}
 
 func (stubExec) Handle(call McpCall) McpResult {

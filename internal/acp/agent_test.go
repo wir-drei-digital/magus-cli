@@ -24,6 +24,9 @@ func TestInitializeReportsVersionAndName(t *testing.T) {
 	if resp.AgentInfo == nil || resp.AgentInfo.Name != "magus" {
 		t.Errorf("expected agent name magus, got %+v", resp.AgentInfo)
 	}
+	if resp.AgentCapabilities.SessionCapabilities.Close == nil {
+		t.Error("agent must advertise sessionCapabilities.close (CloseSession is implemented)")
+	}
 }
 
 func TestInitializeNegotiatesUnsupportedVersionDown(t *testing.T) {
@@ -201,6 +204,44 @@ func TestPromptCancelledReturnsStopReasonCancelled(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Prompt did not return on cancel")
+	}
+}
+
+func TestCloseSessionDisposesAndFreesCloud(t *testing.T) {
+	cloud := newFakeCloud()
+	a := New("tok", "https://magus.digital", "ua")
+	a.SetEditor(&fakeEditor{})
+	a.Dial = func(_ context.Context, _, _, _ string) (CloudConn, error) { return cloud, nil }
+	cloud.events <- chat.Event{Kind: chat.KindServerHello, ServerHello: chat.ServerHello{ConversationID: "conv-close"}}
+
+	ns, err := a.NewSession(context.Background(), sdk.NewSessionRequest{Cwd: "/tmp"})
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+
+	if _, err := a.CloseSession(context.Background(), sdk.CloseSessionRequest{SessionId: ns.SessionId}); err != nil {
+		t.Fatalf("CloseSession: %v", err)
+	}
+
+	// The session is gone: a prompt for it must be rejected.
+	if _, err := a.Prompt(context.Background(), sdk.PromptRequest{SessionId: ns.SessionId, Prompt: []sdk.ContentBlock{sdk.TextBlock("hi")}}); err == nil {
+		t.Error("Prompt after CloseSession must fail with unknown session")
+	}
+
+	// The cloud connection was closed (fakeCloud.Close closes the events chan),
+	// which also ends the Run pump.
+	select {
+	case _, open := <-cloud.events:
+		if open {
+			t.Error("expected the cloud events channel to be closed")
+		}
+	case <-time.After(time.Second):
+		t.Error("cloud connection was not closed")
+	}
+
+	// Closing an unknown session errors.
+	if _, err := a.CloseSession(context.Background(), sdk.CloseSessionRequest{SessionId: "nope"}); err == nil {
+		t.Error("CloseSession on an unknown session must error")
 	}
 }
 

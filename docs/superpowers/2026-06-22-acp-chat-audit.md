@@ -134,7 +134,19 @@ After the fixes above, a second multi-agent review (6 units: 3 adversarial code 
 - **Allowlist guarantee (low, doc):** the chat-CLI plan's `AddAllow` stored the **parent directory**, contradicting its own "cannot leak to `a.txt.bak`" guarantee (it actually granted the whole dir). Fixed — `AddAllow` now stores the **exact resolved file path** (`within()` matches the equal case), so an allow-always scopes to that one file; doc guarantee corrected.
 - **`O_NOFOLLOW` portability (info, doc):** noted that `syscall.O_NOFOLLOW` is POSIX-only and the planned `read_file` `Execute` needs a build-tagged Windows fallback (magus ships a Windows binary).
 
-Still deferred (documented, needs server-side work): a cancelled cloud-side turn keeps running, so a stale `turn.done` could complete a subsequent prompt — to be closed when the server cancel frame / turn-id correlation lands.
+~~Still deferred: a cancelled cloud-side turn keeps running, so a stale `turn.done` could complete a subsequent prompt.~~ **Closed in the Codex round below** (session draining); the server cancel frame itself remains deferred and would shorten the drain window.
+
+## Codex review round (2026-07-26)
+
+A second-opinion review by Codex (GPT-5.x, session `019f9fb6-8458-7f11-833b-22e6f4d5d82d`) over the built Go code surfaced 5 findings; all verified and fixed:
+
+1. **High — stale-turn signal leak, escalated to reachable-in-normal-flow.** Verified against the SDK source: the SDK cancels the prior prompt's ctx **whenever a new `session/prompt` arrives on the same session** (not just on explicit `session/cancel`), so `clearTurn`-on-cancel let the old cloud turn's `turn.done` complete the *next* prompt. Fixed with a **draining** state: a cancelled turn keeps the session busy (new prompts rejected with a clear error) until its terminal event arrives; any terminal event clears the drain (server is single-flight per conversation). Test: cancel → reject-while-draining → drain → next prompt completes on its own terminal only.
+2. **Medium — `session/close` unimplemented.** Now implemented and advertised (`sessionCapabilities.close`): map removal + cloud WS close (unblocks any in-flight prompt, ends the pump). `OnExit` eviction made identity-safe.
+3. **Medium — empty cloud `error` message masqueraded as success.** `TurnEnd` returned `(true, "")` for an `error` event with a missing/empty `message` — and empty is the success sentinel. Now substitutes "cloud turn failed". (Genuinely new find — none of the prior review rounds caught it.)
+4. **Medium — inbound frames never validated `v`.** The chat client now validates the `{type, v}` envelope (`decodeHead`); a parseable frame with the wrong version surfaces as a descriptive `KindError` (failing the handshake fast) instead of being processed as v1; the `NewSession` handshake also surfaces `Event.Err` detail now.
+5. **Low — `tool.start` lacked `kind:"read"`.** `read_file` tool-call timeline entries now carry the ACP read kind; cloud-side tools stay generic.
+
+All fixes tested (`go test ./...` green; `-race -count=3` clean on `internal/acp` + `internal/chat`).
 
 ## Magus-side re-verification (2026-07-26)
 

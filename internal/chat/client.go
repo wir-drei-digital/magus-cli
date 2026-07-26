@@ -112,9 +112,15 @@ func (c *Client) readLoop() {
 			c.cancel()
 			return
 		}
-		typ, err := DecodeType(data)
+		typ, err := decodeHead(data)
 		if err != nil {
-			continue
+			if typ != "" {
+				// Envelope parsed but failed validation (protocol-version
+				// mismatch): surface it rather than processing an incompatible
+				// frame as v1 or silently timing out the handshake.
+				c.emit(Event{Kind: KindError, Err: err})
+			}
+			continue // undecodable frames are dropped per spec §8
 		}
 		switch typ {
 		case "server_hello":

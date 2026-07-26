@@ -27,8 +27,21 @@ func TestMapStreamEmptyDeltaSkipped(t *testing.T) {
 }
 
 func TestMapStreamToolStartAndComplete(t *testing.T) {
-	if _, ok := MapStream(chat.ChatStream{Event: "tool.start", Data: map[string]any{"event_id": "e1", "tool_name": "read_file"}}); !ok {
+	up, ok := MapStream(chat.ChatStream{Event: "tool.start", Data: map[string]any{"event_id": "e1", "tool_name": "read_file"}})
+	if !ok {
 		t.Error("tool.start should map")
+	}
+	// The local read tool carries the ACP read kind for editor rendering.
+	if !updateContains(t, up, `"kind":"read"`) {
+		t.Error("read_file tool.start should carry kind:read")
+	}
+	// Other (cloud-side) tools stay generic.
+	other, ok := MapStream(chat.ChatStream{Event: "tool.start", Data: map[string]any{"event_id": "e2", "tool_name": "brain_search"}})
+	if !ok {
+		t.Error("non-read tool.start should still map")
+	}
+	if updateContains(t, other, `"kind":"read"`) {
+		t.Error("non-read tools must not be tagged kind:read")
 	}
 	if _, ok := MapStream(chat.ChatStream{Event: "tool.complete", Data: map[string]any{"event_id": "e1", "status": "success"}}); !ok {
 		t.Error("tool.complete should map")
@@ -51,6 +64,19 @@ func TestTurnEnd(t *testing.T) {
 	ended, msg := TurnEnd(chat.ChatStream{Event: "error", Data: map[string]any{"message": "boom"}})
 	if !ended || msg != "boom" {
 		t.Errorf("error should end the turn with message, got ended=%v msg=%q", ended, msg)
+	}
+	// An error event must NEVER yield an empty message — empty is the success
+	// sentinel in Session.Prompt, so a malformed cloud error would otherwise
+	// surface as a successful end_turn.
+	for _, cs := range []chat.ChatStream{
+		{Event: "error"},                                        // no data at all
+		{Event: "error", Data: map[string]any{}},                // no message key
+		{Event: "error", Data: map[string]any{"message": ""}},   // empty message
+		{Event: "error", Data: map[string]any{"message": 1234}}, // non-string message
+	} {
+		if ended, msg := TurnEnd(cs); !ended || msg == "" {
+			t.Errorf("TurnEnd(%+v) = (%v, %q), want (true, non-empty)", cs, ended, msg)
+		}
 	}
 	if ended, _ := TurnEnd(chat.ChatStream{Event: "text.delta"}); ended {
 		t.Error("text.delta should not end the turn")

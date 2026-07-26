@@ -68,10 +68,15 @@ func (a *Agent) Initialize(_ context.Context, req sdk.InitializeRequest) (sdk.In
 	a.mu.Unlock()
 
 	return sdk.InitializeResponse{
-		ProtocolVersion:   sdk.ProtocolVersion(sdk.ProtocolVersionNumber),
-		AgentInfo:         &sdk.Implementation{Name: "magus"},
-		AgentCapabilities: sdk.AgentCapabilities{LoadSession: false},
-		AuthMethods:       []sdk.AuthMethod{},
+		ProtocolVersion: sdk.ProtocolVersion(sdk.ProtocolVersionNumber),
+		AgentInfo:       &sdk.Implementation{Name: "magus"},
+		AgentCapabilities: sdk.AgentCapabilities{
+			LoadSession: false,
+			// {} advertises session/close support (implemented below): the
+			// editor can dispose a session, freeing its cloud WS + goroutines.
+			SessionCapabilities: sdk.SessionCapabilities{Close: &sdk.SessionCloseCapabilities{}},
+		},
+		AuthMethods: []sdk.AuthMethod{},
 	}, nil
 }
 
@@ -121,6 +126,11 @@ func (a *Agent) NewSession(ctx context.Context, req sdk.NewSessionRequest) (sdk.
 	case e, ok := <-cloud.Events():
 		if !ok || e.Kind != chat.KindServerHello {
 			cloud.Close()
+			if ok && e.Err != nil {
+				// Surface the server's actual reason (error frame code/message
+				// or a protocol-version mismatch) instead of a generic line.
+				return sdk.NewSessionResponse{}, fmt.Errorf("did not receive server_hello: %w", e.Err)
+			}
 			return sdk.NewSessionResponse{}, fmt.Errorf("did not receive server_hello")
 		}
 		ev = e
@@ -151,13 +161,22 @@ func (a *Agent) NewSession(ctx context.Context, req sdk.NewSessionRequest) (sdk.
 		Ctx:     context.Background(),
 		// Self-evict when the cloud connection closes so dead sessions don't
 		// linger in the map for the life of the (long-lived) acp process.
-		OnExit: func() { a.mu.Lock(); delete(a.sessions, convID); a.mu.Unlock() },
+		// Identity-checked so a late OnExit can never evict a different
+		// session that reused the same id (e.g. after an explicit close).
+		OnExit: nil, // set below, after sess exists, so it can compare identity
 		Exec: &Executor{
 			SessionID:  convID,
 			Editor:     editor,
 			Advertised: adv,
 			Ctx:        context.Background(),
 		},
+	}
+	sess.OnExit = func() {
+		a.mu.Lock()
+		if a.sessions[convID] == sess {
+			delete(a.sessions, convID)
+		}
+		a.mu.Unlock()
 	}
 	a.mu.Lock()
 	a.sessions[convID] = sess
@@ -255,8 +274,23 @@ func (a *Agent) Authenticate(context.Context, sdk.AuthenticateRequest) (sdk.Auth
 func (a *Agent) Logout(context.Context, sdk.LogoutRequest) (sdk.LogoutResponse, error) {
 	return sdk.LogoutResponse{}, sdk.NewMethodNotFound("logout")
 }
-func (a *Agent) CloseSession(context.Context, sdk.CloseSessionRequest) (sdk.CloseSessionResponse, error) {
-	return sdk.CloseSessionResponse{}, sdk.NewMethodNotFound("session/close")
+
+// CloseSession disposes a session on editor request (advertised via
+// sessionCapabilities.close): it is removed from the map and its cloud WS is
+// closed, which unblocks any in-flight prompt (per spec, close implies cancel)
+// and ends the Run pump. The identity-checked OnExit then no-ops.
+func (a *Agent) CloseSession(_ context.Context, req sdk.CloseSessionRequest) (sdk.CloseSessionResponse, error) {
+	a.mu.Lock()
+	sess := a.sessions[string(req.SessionId)]
+	if sess != nil {
+		delete(a.sessions, string(req.SessionId))
+	}
+	a.mu.Unlock()
+	if sess == nil {
+		return sdk.CloseSessionResponse{}, sdk.NewInvalidParams("unknown session")
+	}
+	sess.Cloud.Close()
+	return sdk.CloseSessionResponse{}, nil
 }
 func (a *Agent) ListSessions(context.Context, sdk.ListSessionsRequest) (sdk.ListSessionsResponse, error) {
 	return sdk.ListSessionsResponse{}, sdk.NewMethodNotFound("session/list")

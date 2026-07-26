@@ -1,6 +1,10 @@
 package chat
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+)
 
 const protocolVersion = 1
 
@@ -92,6 +96,28 @@ func DecodeType(data []byte) (string, error) {
 	}
 	if err := json.Unmarshal(data, &head); err != nil {
 		return "", err
+	}
+	return head.Type, nil
+}
+
+// decodeHead parses and validates the {type, v} envelope of an inbound frame.
+// Every frame must carry a non-empty type and the supported protocol version.
+// A returned non-empty type alongside an error means the envelope parsed but
+// failed validation (e.g. version mismatch) — a protocol error worth surfacing,
+// as opposed to undecodable garbage (empty type + error), which callers ignore.
+func decodeHead(data []byte) (string, error) {
+	var head struct {
+		Type string `json:"type"`
+		V    int    `json:"v"`
+	}
+	if err := json.Unmarshal(data, &head); err != nil {
+		return "", err
+	}
+	if head.Type == "" {
+		return "", errors.New("frame missing type")
+	}
+	if head.V != protocolVersion {
+		return head.Type, fmt.Errorf("unsupported protocol version %d (want %d)", head.V, protocolVersion)
 	}
 	return head.Type, nil
 }
