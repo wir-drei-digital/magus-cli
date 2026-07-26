@@ -8,6 +8,8 @@
 
 **Tech Stack:** Elixir, Phoenix 1.8 (Bandit adapter), `websock_adapter`, Ash, Jido / `jido_ai` ReAct strategy, Phoenix.PubSub, ExUnit + Mox.
 
+> **Transport-coexistence note (added 2026-07-26):** the app has since grown a Phoenix Channel chat transport for the SPA (`socket "/socket", MagusWeb.UserSocket` → `MagusWeb.Channels.ConversationChannel`), subscribing to the same `agents:{conversation_id}` topic. This plan's raw-WS `/cli/chat` path remains the right choice for the Go CLI (no Phoenix-channel wire protocol to implement client-side, header-based PAT auth at upgrade), and the two transports don't interact — but implementers should know both exist, and a future consolidation onto Channels is a legitimate refactor once a Go Phoenix-channel client is acceptable.
+
 **Repo:** All work is in `/Users/daniel/Development/magus`. (This plan doc lives in `magus-cli/docs/superpowers/plans/` as the planning hub, per the spec.)
 
 **Spec:** `magus-cli/docs/superpowers/specs/2026-06-02-magus-chat-skeleton-design.md`.
@@ -79,15 +81,17 @@ Expected: FAIL — `ArgumentError: unknown registry: Magus.Cli.ConnectionRegistr
 
 - [ ] **Step 3: Add the dependency**
 
-In `mix.exs`, add to `deps/0` (alongside `{:bandit, "~> 1.5"}`):
+In `mix.exs`, add to `deps/0` (alongside `{:bandit, "~> 1.5"}` at ~mix.exs:114):
 
 ```elixir
 {:websock_adapter, "~> 0.5"},
 ```
 
+> NOTE (re-verified 2026-07-26): `websock_adapter` is already a **transitive** dep (Phoenix 1.8 requires it; `websock_adapter 0.5.9` in mix.lock), so `WebSockAdapter.upgrade/4` is loadable today. Adding the explicit direct dep is belt-and-suspenders for a module we call directly — keep it.
+
 - [ ] **Step 4: Start the Registry in the supervision tree**
 
-In `lib/magus/application.ex`, add to the `children` list (near the other infra children, e.g. after the PubSub entry):
+In `lib/magus/application.ex`: the supervision list is no longer one flat `children = [...]` — it is composed via `child_specs/0` = `base_children() ++ instance_manager_children() ++ extra_children() ++ final_children()`. Add the Registry to **`base_children/0`**, right after `{Phoenix.PubSub, name: Magus.PubSub}` (~application.ex:123):
 
 ```elixir
 {Registry, keys: :unique, name: Magus.Cli.ConnectionRegistry},
@@ -113,7 +117,7 @@ git commit -m "feat(chat): add websock_adapter dep and CLI connection registry"
 - Create: `lib/magus/agents/tools/remote/read_file.ex`
 - Test: `test/magus/agents/tools/remote/read_file_test.exs`
 
-> Contract facts (verified): the ReAct runner invokes `run(params, context)` inside a `Task.async_stream` with **`timeout: :infinity`**, AND `safe_execute_module/4` **discards** the per-tool `timeout_ms` it is handed (`runner.ex` ~1092-1093) — so there is **no enforced wall-clock at all**. The proxy's self-enforced timeout is therefore the *sole* bound; any future change that makes `safe_execute_module` honor `tool_timeout_ms` must keep it ≥ the proxy timeout. The runner retries **only** `{:error, %{type: :timeout|:exception|:execution_error}}`. So this proxy self-enforces its timeout, **never raises**, and returns every failure as a terminal `{:ok, %{error: ...}}`. Params arrive string-keyed from the LLM; context uses atom keys (`Helpers.get_param/2` and `validate_context/2` handle both).
+> Contract facts (re-verified 2026-07-26): the outer `Task.async_stream` is still `timeout: :infinity` (`runner.ex` ~1076), **but since 2026-07-08 (`4e9ddd2a`) `safe_execute_module/4` ENFORCES the per-tool wall-clock** — it runs `run/2` in a `Task`, `Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill)` (`runner.ex` ~1749-1785). Effective bound: `tool_timeout_ms` = **120_000** on the ConversationAgent path (`conversation_agent.ex:67`), **15_000** default elsewhere. A brutal-killed proxy yields a **retryable** `{:error, %{type: :timeout}}` — exactly what this design must avoid. **Therefore the proxy MUST export `execution_timeout_ms/0` returning `:infinity`** (the runner honors per-tool overrides, `runner.ex` ~1434-1439) so its own `receive … after` self-timeout remains the sole bound and every failure stays a terminal `{:ok, %{error: ...}}`. The runner retries **only** `{:error, %{type: :timeout|:exception|:execution_error}}` (`retryable?/1` ~1445-1450; new `:caught`/`:task_exit` types are non-retryable). The proxy still **never raises** (a raise is rescued to `:exception` → retried). Params arrive string-keyed from the LLM; context uses atom keys (`Helpers.get_param` and `validate_context/2` handle both — note `get_param` is now `/2` and `/3`). The runner also injects `:__event_id__`, `:__tool_name__`, `:__conversation_id__` into the tool context (~1397-1401) — `__event_id__` matches the `tool.start`/`tool.complete` broadcast `event_id`, so forwarding it in `mcp_call` would let the CLI correlate the permission dialog with the timeline entry (closes the known cosmetic gap).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -203,10 +207,13 @@ defmodule Magus.Agents.Tools.Remote.ReadFile do
 
   `run/2` resolves the caller's WebSocket handler from the connection registry
   (by `caller_session_id`, never by conversation), then does a synchronous
-  `send`/`receive` round-trip with a self-enforced timeout. The runner enforces
-  no wall-clock timeout, so we bound it here. All failures are returned as
-  terminal `{:ok, %{error: ...}}` (never raised, never `type: :timeout/:exception`)
-  so the ReAct loop does not retry a denied/absent/timed-out call.
+  `send`/`receive` round-trip with a self-enforced timeout. We opt out of the
+  runner's wall-clock (`execution_timeout_ms/0` -> :infinity) so our own
+  timeout is the sole bound — a runner brutal-kill would surface as a
+  RETRYABLE `{:error, %{type: :timeout}}`, which this design must avoid.
+  All failures are returned as terminal `{:ok, %{error: ...}}` (never raised,
+  never `type: :timeout/:exception`) so the ReAct loop does not retry a
+  denied/absent/timed-out call.
   """
 
   use Jido.Action,
@@ -223,6 +230,10 @@ defmodule Magus.Agents.Tools.Remote.ReadFile do
   import Magus.Agents.Tools.Helpers, only: [validate_context: 2, get_param: 2]
 
   @registry Magus.Cli.ConnectionRegistry
+
+  # Opt out of the runner's enforced wall-clock (safe_execute_module honors this
+  # per-tool override); the proxy's own receive-timeout below is the sole bound.
+  def execution_timeout_ms, do: :infinity
 
   def display_name, do: "Reading local file..."
   def summarize_output(%{content: c}) when is_binary(c), do: "#{c |> String.split("\n") |> length()} lines"
@@ -497,7 +508,7 @@ Expected: PASS (5 tests).
 
 - [ ] **Step 5: Wire it into Preflight (one line)**
 
-In `lib/magus/agents/plugins/support/preflight.ex`, in `build_react_signal/*`, the `react_signal` pipeline currently ends (around line 113-114):
+In `lib/magus/agents/plugins/support/preflight.ex`, in `build_react_signal/*`, the `react_signal` pipeline currently ends (re-verified 2026-07-26 at lines ~152-153):
 
 ```elixir
             |> maybe_put_runtime_field(:model_name, data)
@@ -511,6 +522,8 @@ Insert the augment step immediately before the `then(...)`:
             |> Magus.Agents.Tools.Remote.Injection.augment(data)
             |> then(&Jido.Signal.new!("ai.react.query", &1))
 ```
+
+> NOTE (2026-07-26): Preflight now builds a **second** `ai.react.query` signal for the `agent.resume` wake-up path (~preflight.ex:223-236). We deliberately do **not** augment it: wake-ups are autonomous turns with no live caller connection, so no local tools should be offered there. If a "local tools on resume" expectation ever arises, that builder is where it would silently be missing.
 
 - [ ] **Step 6: Verify compile + format + full Preflight tests still pass**
 
@@ -1059,6 +1072,8 @@ and the mapper + frame helper (near the other private helpers):
   end
 ```
 
+> NOTE (signal families as of 2026-07-26): the `map_signal(_) -> nil` catch-all now deliberately drops a larger set of broadcast types: `thinking.chunk` (model reasoning — consider forwarding in v-next; SseStreamer already streams it), `turn.empty`, `turn.keepalive`, `turn.started`, `turn.completed`, `state.change`, `context.updated`, `run.*`, `tool.progress`, `tool.step.*`, `ui.open_brain_pane`. Dropping them is correct for the v1 skeleton; the catch-all + the "ignores unmapped signal types" test cover it. `summarize_tool_result` moved to `lib/magus/agents/plugins/support/persistence.ex` (~131-143; behavior unchanged — proxy terminal `{:ok, %{error: ...}}` still classifies `:success`, the known status-mapping caveat).
+
 - [ ] **Step 4: Run the stream test to verify it passes**
 
 Run: `mix test test/magus_web/cli/chat_socket_stream_test.exs`
@@ -1096,7 +1111,7 @@ defmodule MagusWeb.Cli.ChatSocketChatTest do
 end
 ```
 
-> NOTE: the read interface is `Magus.Chat.message_history!` (code interface `:message_history`, action `:for_conversation`, verified in `lib/magus/chat/chat.ex:138`); `list_messages!` does not exist. It returns an Ash keyset page, so pipe through `Enum.to_list()` before `Enum.find` (as above). The async agent dispatch may run without an LLM expectation — if it logs a Mox error, add a benign stub: `expect(Magus.Test.Mocks.LLMMock, :chat, fn _, _, _ -> Magus.Test.Mocks.mock_stream_response("ok") end)` (see `test/support/mocks.ex` for the exact builder name/arity).
+> NOTE: the read interface is `Magus.Chat.message_history!` (code interface `:message_history`, action `:for_conversation`, re-verified 2026-07-26 at `lib/magus/chat/chat.ex:155`); `list_messages!` does not exist. The action has `pagination keyset?: true, required?: false`, so a default (no `page:`) call returns a **plain list** — the `Enum.to_list()` above is a harmless no-op kept for safety if a `page:` option is ever added. The async agent dispatch may run without an LLM expectation — if it logs a Mox error, add a benign stub: `expect(Magus.Test.Mocks.LLMMock, :chat, fn _, _, _ -> Magus.Test.Mocks.mock_stream_response("ok") end)` (see `test/support/mocks.ex` for the exact builder name/arity).
 
 - [ ] **Step 6: Run the chat test to verify it passes**
 
@@ -1185,7 +1200,7 @@ end
 
 - [ ] **Step 4: Add the route + pipeline**
 
-In `lib/magus_web/router.ex`, add a pipeline (near the `:api_v2` pipeline) and a scope:
+The router was split (re-verified 2026-07-26): `lib/magus_web/router.ex` is now a thin composer (`use MagusWeb.CoreRouter` + `core_pipelines()` + `core_routes()`) that also owns the SPA catch-all `get "/*path", NextUiController, :spa`. Add the pipeline + scope in **`lib/magus_web/core_router.ex`** — pipeline near `:api_v2` (~core_router.ex:169-173, which it mirrors), scope inside `core_routes()` so it registers **before** the SPA catch-all swallows the path:
 
 ```elixir
   pipeline :cli_socket do
@@ -1198,7 +1213,7 @@ In `lib/magus_web/router.ex`, add a pipeline (near the `:api_v2` pipeline) and a
   end
 ```
 
-(Keep this separate from the existing browser-session `scope "/cli"`, which uses `[:browser, :require_auth_browser]`.)
+(Keep this separate from the existing browser-session `scope "/cli"` at ~core_router.ex:447-453 (`/cli/authorize`, `[:browser, :require_auth_browser]`) — distinct path, no conflict. Note we deliberately do NOT add `RequireTokenScope` (the `:api_v2` second plug): it allows GET on `:read` tokens anyway, and the v1 decision is any valid token may chat. The token lookup already enforces revocation/expiry at query level.)
 
 - [ ] **Step 5: Run test to verify it passes**
 
