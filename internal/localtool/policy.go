@@ -24,6 +24,13 @@ func NewPolicy(perms config.Permissions) *Policy { return &Policy{perms: perms} 
 func (p *Policy) Permissions() config.Permissions { return p.perms }
 
 func (p *Policy) Decide(plan Plan) Decision {
+	// An explicit "deny" tier is a kill switch and is checked BEFORE the allow
+	// rules: persisted rules only ever upgrade prompt -> allow, never
+	// deny -> allow. Otherwise a stale "allow always" from an earlier session
+	// would silently defeat a user who has since set the tier to deny.
+	if p.tierDefault(plan.Tier) == "deny" {
+		return DecisionDeny
+	}
 	for _, r := range p.perms.Allow {
 		// Match on path-segment boundaries, NOT a raw string prefix. A raw
 		// strings.HasPrefix lets an "allow always" on /proj/a.txt silently

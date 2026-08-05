@@ -7,7 +7,8 @@ type ChatConfig struct {
 
 // Permissions is the local policy for cloud-proposed local tools. Tier defaults
 // are "prompt" | "allow" | "deny"; an empty value means "prompt" (fail-safe).
-// Allow rules are the persisted "allow always" decisions.
+// Allow rules are the persisted "allow always" decisions. An explicit "deny"
+// tier overrides persisted allow rules: rules only upgrade prompt to allow.
 type Permissions struct {
 	Read  string      `toml:"read,omitempty"`
 	Write string      `toml:"write,omitempty"`
