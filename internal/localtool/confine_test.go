@@ -121,4 +121,49 @@ func TestConfine(t *testing.T) {
 			t.Fatalf("expected ErrEscapesRoot for unresolvable ancestor, got %v", err)
 		}
 	})
+
+	// The ancestor walk starts at Dir(target), so it never classifies the
+	// target's OWN final component. A leaf that exists but cannot be fully
+	// resolved must therefore be rejected by the leaf check, not left to the
+	// walk (which would only inspect the leaf's parent and find it contained).
+
+	// Variant (a): the escaping symlink IS the leaf, under a directory that
+	// cannot be traversed. The walk would check root/priv2 — inside root — and
+	// accept the escaping path.
+	t.Run("unresolvable symlink leaf rejected", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("running as root: permission bits are not enforced")
+		}
+		priv := filepath.Join(root, "priv2")
+		if err := os.MkdirAll(priv, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		outside := t.TempDir()
+		if err := os.Symlink(outside, filepath.Join(priv, "esc")); err != nil {
+			t.Skipf("symlink unsupported: %v", err)
+		}
+		if err := os.Chmod(priv, 0o000); err != nil {
+			t.Skipf("chmod unsupported: %v", err)
+		}
+		// Restore before TempDir cleanup, which cannot remove an unreadable dir.
+		t.Cleanup(func() { _ = os.Chmod(priv, 0o700) })
+
+		if _, err := Confine(root, "priv2/esc"); !errors.Is(err, ErrEscapesRoot) {
+			t.Fatalf("expected ErrEscapesRoot for unresolvable symlink leaf, got %v", err)
+		}
+	})
+
+	// Variant (b): a DANGLING symlink pointing outside root. EvalSymlinks fails
+	// with ENOENT — indistinguishable from a plain missing file unless the leaf
+	// itself is stat'd — yet a write through this path would land outside root.
+	t.Run("dangling symlink leaf escaping root rejected", func(t *testing.T) {
+		outside := t.TempDir()
+		link := filepath.Join(root, "link2")
+		if err := os.Symlink(filepath.Join(outside, "nonexistent"), link); err != nil {
+			t.Skipf("symlink unsupported: %v", err)
+		}
+		if _, err := Confine(root, "link2"); !errors.Is(err, ErrEscapesRoot) {
+			t.Fatalf("expected ErrEscapesRoot for dangling escaping symlink, got %v", err)
+		}
+	})
 }

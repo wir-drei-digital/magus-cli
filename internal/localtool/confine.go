@@ -5,6 +5,7 @@ package localtool
 import (
 	"errors"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -36,16 +37,29 @@ func Confine(root, path string) (string, error) {
 	}
 
 	// Layer 2: symlink containment (only meaningful when the target exists).
-	// Any resolution error falls through to layer 3, which is safe ONLY because
-	// layer 3 classifies the error: an unresolvable component is rejected there
-	// rather than mistaken for a missing one. EvalSymlinks resolves left to
-	// right, so an EACCES/ELOOP ancestor surfaces here first and layer 3 hits it
-	// again on the very first iteration of its walk.
 	if real, err := filepath.EvalSymlinks(target); err == nil {
 		if !within(absRoot, real) {
 			return "", ErrEscapesRoot
 		}
 		return real, nil
+	}
+
+	// Layer 2b: leaf classification. Resolution failed, which means one of two
+	// very different things — and the layer-3 walk below CANNOT tell them apart
+	// because it starts at Dir(target) and so never inspects the leaf itself:
+	//
+	//   - the leaf EXISTS but cannot be fully resolved: a dangling symlink
+	//     (root/link -> /outside/new.txt: ENOENT, yet a write through it lands
+	//     outside root) or a symlink under a directory we cannot traverse
+	//     (root/priv mode 0000 holding esc -> /outside). Containment is
+	//     UNKNOWN, and the walk would clear it by checking only the parent.
+	//   - the leaf genuinely DOES NOT EXIST: the ordinary "create it here" and
+	//     "read a missing file" case, which must stay allowed.
+	//
+	// Lstat separates them without following the final component. Anything but
+	// a confirmed-absent leaf fails closed.
+	if _, err := os.Lstat(target); err == nil || !errors.Is(err, fs.ErrNotExist) {
+		return "", ErrEscapesRoot
 	}
 
 	// Layer 3: nonexistent leaf — the lexical check above only proves the
@@ -56,7 +70,8 @@ func Confine(root, path string) (string, error) {
 	// the parent resolves OUTSIDE root. Resolve the deepest EXISTING ancestor
 	// and re-check containment of that resolved ancestor before accepting the
 	// lexical target. (Benign for read_file — the leaf must exist — but a
-	// write-outside-root hole once the deferred write_file lands.)
+	// write-outside-root hole once the deferred write_file lands.) This walk
+	// covers ANCESTORS only; the leaf is covered by layer 2b above.
 	ancestor := filepath.Dir(target)
 	for {
 		real, err := filepath.EvalSymlinks(ancestor)
