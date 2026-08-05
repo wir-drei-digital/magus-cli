@@ -11,6 +11,7 @@ const (
 	DecisionPrompt Decision = iota
 	DecisionAllow
 	DecisionDeny
+	DecisionAllowAlways
 )
 
 // Policy decides whether a planned tool call is allowed, prompts, or is denied,
