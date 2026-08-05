@@ -946,6 +946,12 @@ func NewPolicy(perms config.Permissions) *Policy { return &Policy{perms: perms} 
 func (p *Policy) Permissions() config.Permissions { return p.perms }
 
 func (p *Policy) Decide(plan Plan) Decision {
+	// Explicit deny wins: a tier the user set to "deny" is a kill switch that
+	// no persisted allow-always rule may override (IAM/ACL convention; decided
+	// 2026-08-06). Rules only ever upgrade prompt->allow, never deny->allow.
+	if p.tierDefault(plan.Tier) == "deny" {
+		return DecisionDeny
+	}
 	for _, r := range p.perms.Allow {
 		// Match on path-segment boundaries, NOT a raw string prefix. A raw
 		// strings.HasPrefix lets an "allow always" on /proj/a.txt silently
@@ -1974,7 +1980,11 @@ func runChat(ctx context.Context, opts chatOptions) error {
 		Audit:    &localtool.FileAudit{Path: filepath.Join(opts.ConfigDir, "chat-audit.jsonl")},
 		OnAllowAlways: func(p *localtool.Policy) {
 			if c, err := config.Load(); err == nil {
-				c.Chat.Permissions = p.Permissions()
+				// Write back ONLY the allow rules. Assigning the whole
+				// Permissions struct would clobber tier defaults the user
+				// edited mid-session (e.g. flipping read="deny") with this
+				// session's stale copy.
+				c.Chat.Permissions.Allow = p.Permissions().Allow
 				_ = c.Save()
 			}
 		},
@@ -2093,7 +2103,7 @@ git add -A && git commit -m "chore(chat): verification fixups"
 - **Threat model:** single-user developer machine. The cloud agent is semi-trusted (its tool proposals are policy-gated and human-approved); a local attacker who already runs code as the same user is largely out of scope, which bounds the severity of the residual races below.
 - **Path confinement (Task 4):** three layers — lexical (`../`/absolute-outside), symlink-on-existing-target, and nonexistent-leaf ancestor resolution. The third layer closes the symlinked-parent / nonexistent-leaf write-outside-root hole that lands with the deferred `write_file` (test noted in Task 4).
 - **Execute TOCTOU (Task 5):** confinement happens at `Plan` time but `Execute` runs after the human-approval window. `read_file` opens through `os.Root` (`os.OpenRoot` on the resolved confinement root, then a root-relative open): the kernel resolves every component beneath the root fd, closing both the final-component and parent-directory swap races. Portable across darwin/linux/windows — no build-tag split. Residual: bind mounts, `/proc` magic links, and hardlinks inside root that point at content outside are not prohibited by `os.Root` (documented library caveats); accepted under the single-user threat model. *(2026-08-05: supersedes the original O_NOFOLLOW+fstat design.)*
-- **Allow-rule boundary (Task 6):** persisted "allow always" rules match on path-segment boundaries via `within()`, never raw `strings.HasPrefix`, and `AddAllow` stores the **exact resolved file path** (`within()` matches the equal case) — so an allow on `/proj/a.txt` matches only `/proj/a.txt`, never `/proj/a.txt.bak` or a sibling. (A whole-directory grant would store a parent dir instead; we don't, to avoid widening a per-file approval.)
+- **Allow-rule boundary (Task 6):** persisted "allow always" rules match on path-segment boundaries via `within()`, never raw `strings.HasPrefix`, and `AddAllow` stores the **exact resolved file path** (`within()` matches the equal case) — so an allow on `/proj/a.txt` matches only `/proj/a.txt`, never `/proj/a.txt.bak` or a sibling. (A whole-directory grant would store a parent dir instead; we don't, to avoid widening a per-file approval.) **Explicit deny wins** (2026-08-06): a tier set to `"deny"` short-circuits before the rule scan — no persisted rule can override the kill switch — and Task 11's allow-always save-back writes only the `Allow` slice so mid-session tier edits are never clobbered.
 - **Anti-spoofing:** the approver only ever renders `plan.Display` (built client-side in `Tool.Plan`); no server-supplied path reaches the prompt (Tasks 5, 7, 9).
 
 ## Self-review notes (coverage vs. spec §5.3, §7)
