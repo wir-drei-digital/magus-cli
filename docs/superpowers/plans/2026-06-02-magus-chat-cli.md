@@ -619,7 +619,7 @@ git commit -m "feat(chat): path confinement against traversal and symlink escape
 
 > `Plan` does the tool-specific safety (confinement) and produces `Display` — the **client-canonical** string shown at approval. `Execute` reads only what `Plan` resolved. This is the anti-spoofing seam.
 >
-> **Security (TOCTOU):** confinement runs at `Plan` time, but `Execute` runs after the human-approval window. Re-opening by name re-resolves symlinks, so a racing local process could swap a component to point outside root between approval and open. `Execute` therefore opens with `O_NOFOLLOW` on the final component and fstat-compares against the Plan-time inode. A residual race remains on the *path prefix* (an attacker who can swap a parent directory mid-window); we accept it under the single-user dev threat model (the attacker already runs as the user on the same machine) and document it in the Security section. **Portability:** `syscall.O_NOFOLLOW` is POSIX-only (darwin/linux); since `magus` also ships a Windows build (goreleaser), put the `O_NOFOLLOW` open in a build-tagged `readfile_unix.go` with a `readfile_windows.go` fallback (plain `os.Open`, weaker guarantee) so the Windows build still compiles.
+> **Security (TOCTOU):** confinement runs at `Plan` time, but `Execute` runs after the human-approval window. Re-opening by name re-resolves symlinks, so a racing local process could swap a component to point outside root between approval and open. `Execute` therefore opens through **`os.Root`** (Go 1.24+; kernel-enforced `openat2`/`RESOLVE_BENEATH`-style traversal): `os.OpenRoot(rf.Root)`, then open the path *relative to the resolved root* inside it. Every component — prefix included — is resolved beneath the root fd, closing both the final-component swap and the parent-directory swap race that an `O_NOFOLLOW`+fstat scheme leaves open. Portable: works on Windows too (and rejects reserved device names), so no build-tagged split is needed. *(Decision 2026-08-05: supersedes the original O_NOFOLLOW+fstat design after review verified `os.Root` availability in the toolchain.)*
 
 - [ ] **Step 1: Write the failing test**
 
@@ -752,7 +752,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"syscall"
+	"path/filepath"
 )
 
 // ReadFile reads a file on the local machine, confined to Root and capped at MaxBytes.
@@ -790,28 +790,34 @@ func (rf *ReadFile) Plan(params map[string]any) (Plan, error) {
 func (rf *ReadFile) Execute(plan Plan) (any, error) {
 	// TOCTOU note: `plan.path` is the symlink-resolved path produced by Plan
 	// (confinement happened then). Between Plan and Execute lies the human-
-	// approval window, and os.Open re-resolves symlinks at open time — a racing
-	// local process could swap a now-final component to a symlink pointing
-	// outside root after approval but before the open. Open the already-
-	// validated object rather than re-resolving the name: open the final
-	// component with O_NOFOLLOW so a swapped-in symlink fails instead of being
-	// followed, and (defensively) fstat-compare against the Plan-time resolution
-	// before reading. Residual race on the *path prefix* is documented in the
-	// Security section; the single-user dev threat model bounds severity (an
-	// attacker already runs as the user on the same machine).
-	f, err := os.OpenFile(plan.path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	// approval window, and re-opening by name re-resolves symlinks at open
+	// time — a racing local process could swap any component to point outside
+	// root after approval but before the open. Open through os.Root instead:
+	// every component (prefix included) is kernel-resolved BENEATH the root
+	// directory fd, so a swapped-in symlink escaping root fails at open rather
+	// than being followed. plan.path is under the *resolved* root (Confine
+	// resolves the root itself), so relativize against that.
+	resolvedRoot, err := filepath.Abs(rf.Root)
+	if err != nil {
+		return nil, err
+	}
+	if real, rerr := filepath.EvalSymlinks(resolvedRoot); rerr == nil {
+		resolvedRoot = real
+	}
+	rel, err := filepath.Rel(resolvedRoot, plan.path)
+	if err != nil {
+		return nil, ErrEscapesRoot
+	}
+	r, err := os.OpenRoot(resolvedRoot)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	f, err := r.Open(rel)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-
-	// Confirm the opened object is the same inode Plan resolved (best-effort
-	// guard against a prefix-component swap during the approval window).
-	if want, err := os.Lstat(plan.path); err == nil {
-		if got, err := f.Stat(); err == nil && !os.SameFile(want, got) {
-			return nil, ErrEscapesRoot
-		}
-	}
 
 	limit := rf.MaxBytes
 	if limit <= 0 {
@@ -2086,7 +2092,7 @@ git add -A && git commit -m "chore(chat): verification fixups"
 
 - **Threat model:** single-user developer machine. The cloud agent is semi-trusted (its tool proposals are policy-gated and human-approved); a local attacker who already runs code as the same user is largely out of scope, which bounds the severity of the residual races below.
 - **Path confinement (Task 4):** three layers — lexical (`../`/absolute-outside), symlink-on-existing-target, and nonexistent-leaf ancestor resolution. The third layer closes the symlinked-parent / nonexistent-leaf write-outside-root hole that lands with the deferred `write_file` (test noted in Task 4).
-- **Execute TOCTOU (Task 5):** confinement happens at `Plan` time but `Execute` runs after the human-approval window. `read_file` opens the resolved path with `O_NOFOLLOW` and fstat-compares against the Plan-time inode. **Residual race:** an attacker who can swap a *parent directory* component between approval and open could still redirect the open; this is accepted under the single-user threat model and should be revisited (openat-style fd-relative traversal) if the model ever widens. **POSIX-only:** `syscall.O_NOFOLLOW` is darwin/linux; build-tag a Windows fallback (`magus` ships a Windows binary).
+- **Execute TOCTOU (Task 5):** confinement happens at `Plan` time but `Execute` runs after the human-approval window. `read_file` opens through `os.Root` (`os.OpenRoot` on the resolved confinement root, then a root-relative open): the kernel resolves every component beneath the root fd, closing both the final-component and parent-directory swap races. Portable across darwin/linux/windows — no build-tag split. Residual: bind mounts, `/proc` magic links, and hardlinks inside root that point at content outside are not prohibited by `os.Root` (documented library caveats); accepted under the single-user threat model. *(2026-08-05: supersedes the original O_NOFOLLOW+fstat design.)*
 - **Allow-rule boundary (Task 6):** persisted "allow always" rules match on path-segment boundaries via `within()`, never raw `strings.HasPrefix`, and `AddAllow` stores the **exact resolved file path** (`within()` matches the equal case) — so an allow on `/proj/a.txt` matches only `/proj/a.txt`, never `/proj/a.txt.bak` or a sibling. (A whole-directory grant would store a parent dir instead; we don't, to avoid widening a per-file approval.)
 - **Anti-spoofing:** the approver only ever renders `plan.Display` (built client-side in `Tool.Plan`); no server-supplied path reaches the prompt (Tasks 5, 7, 9).
 
