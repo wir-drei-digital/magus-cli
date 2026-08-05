@@ -70,4 +70,55 @@ func TestConfine(t *testing.T) {
 			t.Fatalf("expected ErrEscapesRoot, got %v", err)
 		}
 	})
+
+	// Containment must be evaluated on path SEGMENT boundaries, not raw string
+	// prefixes: a sibling directory whose name merely starts with the root's
+	// name is outside the root. Load-bearing for allowlist matching, where an
+	// allow on /proj/a.txt must never match /proj/a.txt.bak.
+	t.Run("string-prefix sibling of root rejected", func(t *testing.T) {
+		// Build the sibling from the SYMLINK-RESOLVED root so the escaping path
+		// really is a raw string-prefix match of the root Confine compares
+		// against (on macOS /var/... resolves to /private/var/...).
+		realRoot, err := filepath.EvalSymlinks(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sibling := realRoot + "x"
+		if err := os.MkdirAll(sibling, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		secret := filepath.Join(sibling, "secret.txt")
+		if err := os.WriteFile(secret, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Confine(root, secret); !errors.Is(err, ErrEscapesRoot) {
+			t.Fatalf("expected ErrEscapesRoot for string-prefix sibling, got %v", err)
+		}
+	})
+
+	// An ancestor that cannot be RESOLVED (EACCES/ELOOP/ENOTDIR) is not the same
+	// as an ancestor that does not exist: treating it as missing and climbing to
+	// its parent lets an unresolvable directory hide a symlink escape.
+	t.Run("unresolvable ancestor rejected", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("running as root: permission bits are not enforced")
+		}
+		priv := filepath.Join(root, "priv")
+		if err := os.MkdirAll(priv, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		outside := t.TempDir()
+		if err := os.Symlink(outside, filepath.Join(priv, "esc")); err != nil {
+			t.Skipf("symlink unsupported: %v", err)
+		}
+		if err := os.Chmod(priv, 0o000); err != nil {
+			t.Skipf("chmod unsupported: %v", err)
+		}
+		// Restore before TempDir cleanup, which cannot remove an unreadable dir.
+		t.Cleanup(func() { _ = os.Chmod(priv, 0o700) })
+
+		if _, err := Confine(root, "priv/esc/secret.txt"); !errors.Is(err, ErrEscapesRoot) {
+			t.Fatalf("expected ErrEscapesRoot for unresolvable ancestor, got %v", err)
+		}
+	})
 }

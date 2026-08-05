@@ -4,6 +4,7 @@ package localtool
 
 import (
 	"errors"
+	"io/fs"
 	"path/filepath"
 	"strings"
 )
@@ -35,6 +36,11 @@ func Confine(root, path string) (string, error) {
 	}
 
 	// Layer 2: symlink containment (only meaningful when the target exists).
+	// Any resolution error falls through to layer 3, which is safe ONLY because
+	// layer 3 classifies the error: an unresolvable component is rejected there
+	// rather than mistaken for a missing one. EvalSymlinks resolves left to
+	// right, so an EACCES/ELOOP ancestor surfaces here first and layer 3 hits it
+	// again on the very first iteration of its walk.
 	if real, err := filepath.EvalSymlinks(target); err == nil {
 		if !within(absRoot, real) {
 			return "", ErrEscapesRoot
@@ -53,11 +59,22 @@ func Confine(root, path string) (string, error) {
 	// write-outside-root hole once the deferred write_file lands.)
 	ancestor := filepath.Dir(target)
 	for {
-		if real, err := filepath.EvalSymlinks(ancestor); err == nil {
+		real, err := filepath.EvalSymlinks(ancestor)
+		if err == nil {
 			if !within(absRoot, real) {
 				return "", ErrEscapesRoot
 			}
 			break
+		}
+		// Fail closed: ONLY a genuinely missing component justifies climbing to
+		// the parent. Any other resolution error (EACCES, ELOOP, ENOTDIR) means
+		// containment of this ancestor is UNKNOWN, not that it is absent —
+		// treating it as absent lets an unresolvable directory hide a symlink
+		// escape. e.g. root/priv is mode 0000 and holds esc -> /outside: the
+		// walk would climb past the unreadable component to root/priv, find it
+		// inside root, and accept root/priv/esc/secret.txt.
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", ErrEscapesRoot
 		}
 		parent := filepath.Dir(ancestor)
 		if parent == ancestor {
