@@ -146,7 +146,10 @@ func runChat(ctx context.Context, opts chatOptions) error {
 		Capabilities:  chat.Capabilities{LocalTools: reg.Names()},
 		Conversation:  map[string]any{"new": true},
 	}); err != nil {
-		return err
+		// Same treatment as every other send: a Ctrl-C landing in the
+		// Dial -> Hello window (which config.Load's disk I/O widens) would
+		// otherwise escape as a raw "context canceled" and exit 1.
+		return sendErr(ctx, opts.Out, err)
 	}
 
 	for ev := range cli.Events() {

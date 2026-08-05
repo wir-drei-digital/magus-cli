@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -215,6 +216,45 @@ func TestRunChatReportsMidTurnDisconnect(t *testing.T) {
 	if !strings.Contains(out.String(), "[connection closed]") {
 		t.Errorf("disconnect not reported to the user; got %q", out.String())
 	}
+}
+
+// sendErr is what every cli.Send call site in runChat funnels its failures
+// through, so its three outcomes are pinned directly.
+func TestSendErrClassifiesFailures(t *testing.T) {
+	live := context.Background()
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	t.Run("dropped connection is reported, not returned", func(t *testing.T) {
+		var out bytes.Buffer
+		if err := sendErr(live, &out, context.Canceled); err != nil {
+			t.Errorf("want nil, got %v", err)
+		}
+		if !strings.Contains(out.String(), "[connection closed]") {
+			t.Errorf("drop not reported; got %q", out.String())
+		}
+	})
+
+	t.Run("user cancellation is silent", func(t *testing.T) {
+		var out bytes.Buffer
+		if err := sendErr(cancelled, &out, context.Canceled); err != nil {
+			t.Errorf("want nil, got %v", err)
+		}
+		if out.String() != "" {
+			t.Errorf("want silence on Ctrl-C; got %q", out.String())
+		}
+	})
+
+	t.Run("any other failure still surfaces", func(t *testing.T) {
+		var out bytes.Buffer
+		want := errors.New("marshal boom")
+		if err := sendErr(live, &out, want); !errors.Is(err, want) {
+			t.Errorf("want %v, got %v", want, err)
+		}
+		if out.String() != "" {
+			t.Errorf("want no close notice for an unrelated failure; got %q", out.String())
+		}
+	})
 }
 
 // wrapTest mirrors chat.Encode for arbitrary maps in this test package.
