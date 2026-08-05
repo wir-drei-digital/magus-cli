@@ -29,6 +29,7 @@ type Profile struct {
 type Config struct {
 	DefaultProfile string             `toml:"default_profile"`
 	Profiles       map[string]Profile `toml:"profiles"`
+	Chat           ChatConfig         `toml:"chat,omitempty"`
 }
 
 // Load reads from the default config directory.
