@@ -100,6 +100,11 @@ func (c *Config) saveTo(dir string) error {
 	return os.Chmod(path, configFileMode)
 }
 
+// DefaultDir is the exported view of defaultDir: the directory the CLI reads
+// and writes its config in, so callers can place sibling artifacts (e.g. the
+// chat audit log) next to it.
+func DefaultDir() (string, error) { return defaultDir() }
+
 func defaultDir() (string, error) {
 	if env := os.Getenv("MAGUS_CONFIG_DIR"); env != "" {
 		return env, nil

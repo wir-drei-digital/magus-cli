@@ -57,6 +57,7 @@ clients.`,
 	addInGroup("data", newPageCmd())
 	addInGroup("data", newSearchCmd())
 
+	addInGroup("agent", newChatCmd())
 	addInGroup("agent", newMCPCmd())
 	addInGroup("agent", newACPCmd())
 	addInGroup("agent", newSkillCmd())
