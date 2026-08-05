@@ -1210,14 +1210,16 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // AuditEntry is one local tool-invocation decision record.
 type AuditEntry struct {
-	Tool           string `json:"tool"`
-	Display        string `json:"display"`
-	Decision       string `json:"decision"` // allow | deny | error
-	ConversationID string `json:"conversation_id,omitempty"`
+	TS             time.Time `json:"ts"` // stamped UTC by Record when zero (spec §audit)
+	Tool           string    `json:"tool"`
+	Display        string    `json:"display"`
+	Decision       string    `json:"decision"` // allow | deny | error
+	ConversationID string    `json:"conversation_id,omitempty"`
 }
 
 // Auditor records tool decisions locally.
@@ -1230,7 +1232,10 @@ type FileAudit struct {
 	Path string
 }
 
-func (a *FileAudit) Record(entry AuditEntry) error {
+func (a *FileAudit) Record(entry AuditEntry) (err error) {
+	if entry.TS.IsZero() {
+		entry.TS = time.Now().UTC()
+	}
 	if err := os.MkdirAll(filepath.Dir(a.Path), 0o700); err != nil {
 		return err
 	}
@@ -1238,7 +1243,19 @@ func (a *FileAudit) Record(entry AuditEntry) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	// Close errors matter here: an audit Record that "succeeded" without the
+	// bytes reaching the filesystem is the one failure mode a security log
+	// cannot have.
+	defer func() {
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+	}()
+	// The perm arg above applies only at creation; tighten a pre-existing file
+	// (same precedent as config saveTo).
+	if err := os.Chmod(a.Path, 0o600); err != nil {
+		return err
+	}
 
 	line, err := json.Marshal(entry)
 	if err != nil {
