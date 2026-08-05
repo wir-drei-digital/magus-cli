@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -76,6 +77,23 @@ func runChat(ctx context.Context, opts chatOptions) error {
 	}
 	defer cli.Close()
 
+	// Ctrl-C has to end the session, and nothing else here would let it.
+	// chat.Dial deliberately detaches the client's internal context from ctx, so
+	// a cancelled ctx leaves this loop waiting on a connection nobody is going to
+	// answer — and pressing Ctrl-C again does not help: signal.NotifyContext
+	// keeps its handler installed for the life of the process, so every later
+	// SIGINT lands in an already-full 1-deep channel instead of reaching the
+	// default kill behaviour. The process would simply be unkillable from the
+	// keyboard. Closing the client on cancel makes readLoop fail, which closes
+	// Events() and unwinds the loop below.
+	//
+	// Residual, deliberately not closed here: a cancel arriving while we are
+	// blocked reading a line from stdin goes unnoticed until that read returns,
+	// because a blocking read on os.Stdin cannot be cancelled. The fix for that
+	// is raw-mode input in the rich TUI.
+	stop := context.AfterFunc(ctx, cli.Close)
+	defer stop()
+
 	reg := localtool.Registry{"read_file": &localtool.ReadFile{Root: opts.Root, MaxBytes: 256 * 1024}}
 
 	// Load persisted permissions for the policy. A config that will not load
@@ -141,7 +159,7 @@ func runChat(ctx context.Context, opts chatOptions) error {
 				return nil // EOF with nothing typed: nothing to send
 			}
 			if err := cli.Send(chat.Chat{SessionID: sessionID, Text: line}); err != nil {
-				return err
+				return sendErr(ctx, opts.Out, err)
 			}
 
 		case chat.KindChatStream:
@@ -161,15 +179,51 @@ func runChat(ctx context.Context, opts chatOptions) error {
 		case chat.KindMcpCall:
 			res := pipeline.Handle(ev.McpCall)
 			if err := cli.Send(res); err != nil {
-				return err
+				return sendErr(ctx, opts.Out, err)
 			}
 
 		case chat.KindError:
 			return ev.Err
 
 		case chat.KindClosed:
+			closedNotice(ctx, opts.Out, ev.Err)
 			return nil
 		}
 	}
 	return nil
+}
+
+// sendErr maps a failed send to what the user should see. A connection that
+// dropped mid-turn races Send: the client's send buffer still has room while
+// its context is already cancelled, so Go picks either case at random and the
+// SAME failure would otherwise exit 0 in silence or exit 1 with a bare
+// "context canceled". Both halves of that coin now converge — the drop is
+// reported once, on the way to a zero exit — whichever way the select lands.
+func sendErr(ctx context.Context, out io.Writer, err error) error {
+	if errors.Is(err, context.Canceled) {
+		closedNotice(ctx, out, nil)
+		return nil
+	}
+	return err
+}
+
+// closedNotice tells the user the connection ended. Silence here reads as a
+// finished turn — a drop mid-approval would otherwise exit 0 having printed
+// nothing at all. An ordinary close (clean handshake, EOF, or the cancel-driven
+// Close above) needs no detail; anything else carries its reason.
+//
+// A user who pressed Ctrl-C is the exception: they already know, and telling
+// them anyway would be a coin flip rather than a message — once the client's
+// context is cancelled, the event carrying the close races the cancellation and
+// arrives only sometimes. Keying off the caller's ctx makes both the silence
+// (cancelled) and the notice (any real drop) deterministic.
+func closedNotice(ctx context.Context, out io.Writer, err error) {
+	if ctx.Err() != nil {
+		return
+	}
+	if chat.IsExpectedClose(err) {
+		fmt.Fprintln(out, "\n[connection closed]")
+		return
+	}
+	fmt.Fprintf(out, "\n[connection closed: %v]\n", err)
 }

@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"time"
 
@@ -144,6 +146,25 @@ func (c *Client) readLoop() {
 			c.emit(Event{Kind: KindError, ChatStream: ChatStream{Event: "error"}, Err: frameErr(fe)})
 		}
 	}
+}
+
+// IsExpectedClose reports whether err is an ordinary end of connection — a
+// clean close handshake, EOF, or a Close this side initiated — as opposed to a
+// transport failure whose reason is worth putting in front of the user. Callers
+// get the classification from here because this is the only package that knows
+// what shape the underlying transport's errors take.
+func IsExpectedClose(err error) bool {
+	if err == nil ||
+		errors.Is(err, io.EOF) ||
+		errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, context.Canceled) {
+		return true
+	}
+	switch websocket.CloseStatus(err) {
+	case websocket.StatusNormalClosure, websocket.StatusGoingAway:
+		return true
+	}
+	return false
 }
 
 // frameErr turns a server-sent error frame into a non-nil error, preferring the
