@@ -4,14 +4,16 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // AuditEntry is one local tool-invocation decision record.
 type AuditEntry struct {
-	Tool           string `json:"tool"`
-	Display        string `json:"display"`
-	Decision       string `json:"decision"` // allow | deny | error
-	ConversationID string `json:"conversation_id,omitempty"`
+	Tool           string    `json:"tool"`
+	Display        string    `json:"display"`
+	Decision       string    `json:"decision"` // allow | deny | error
+	TS             time.Time `json:"ts"`
+	ConversationID string    `json:"conversation_id,omitempty"`
 }
 
 // Auditor records tool decisions locally.
@@ -22,12 +24,23 @@ type Auditor interface {
 // FileAudit appends JSONL entries to Path.
 //
 // The log stays local and stays private: entries carry absolute filesystem
-// paths, so the directory is created 0o700 and the file 0o600 — owner-only.
+// paths, so every Record forces the log file to 0o600 — owner-only — and
+// creates any missing parent directory 0o700. The file mode is enforced on
+// every write, not just at creation, because OpenFile's perm argument applies
+// only when it creates the file and would leave a pre-existing (or
+// umask-widened) log readable by others. A parent directory that already
+// exists keeps whatever mode it has.
 type FileAudit struct {
 	Path string
 }
 
-func (a *FileAudit) Record(entry AuditEntry) error {
+func (a *FileAudit) Record(entry AuditEntry) (err error) {
+	// Every line carries a timestamp. A caller-supplied TS is kept verbatim so
+	// callers can pin it; otherwise Record stamps UTC now.
+	if entry.TS.IsZero() {
+		entry.TS = time.Now().UTC()
+	}
+
 	if err := os.MkdirAll(filepath.Dir(a.Path), 0o700); err != nil {
 		return err
 	}
@@ -35,7 +48,21 @@ func (a *FileAudit) Record(entry AuditEntry) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	// Report close failures: bytes can fail to reach the filesystem at close
+	// time (EDQUOT, NFS flush), and an audit write that silently vanished must
+	// not be reported as recorded. A write error already in flight wins.
+	defer func() {
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+	}()
+
+	// Defeat a permissive umask and tighten a log that already existed with
+	// wider perms. The audit log is a security artifact, so failing to secure
+	// it is a Record failure, not a warning.
+	if err := os.Chmod(a.Path, 0o600); err != nil {
+		return err
+	}
 
 	line, err := json.Marshal(entry)
 	if err != nil {
