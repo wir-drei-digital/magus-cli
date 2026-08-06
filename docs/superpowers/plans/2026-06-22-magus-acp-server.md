@@ -115,7 +115,9 @@ defmodule MagusWeb.Cli.ChatSocketAcpParityTest do
       })
 
     assert {:ok, new_state} = ChatSocket.handle_in({frame, [opcode: :text]}, state)
-    assert_receive {:mcp_result, "call-1", "ok", %{"content" => "defmodule App"}}
+    # NOTE: production uses the 5-tuple {:mcp_result, call_id, status, result, error}
+    # (5th element = the CLI's top-level error{code,message}); match the trailing _error.
+    assert_receive {:mcp_result, "call-1", "ok", %{"content" => "defmodule App"}, _error}
     refute Map.has_key?(new_state.pending, "call-1")
   end
 end

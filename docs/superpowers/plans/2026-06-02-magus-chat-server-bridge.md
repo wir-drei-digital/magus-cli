@@ -8,6 +8,8 @@
 
 **Tech Stack:** Elixir, Phoenix 1.8 (Bandit adapter), `websock_adapter`, Ash, Jido / `jido_ai` ReAct strategy, Phoenix.PubSub, ExUnit + Mox.
 
+> **Transport-coexistence note (added 2026-07-26):** the app has since grown a Phoenix Channel chat transport for the SPA (`socket "/socket", MagusWeb.UserSocket` → `MagusWeb.Channels.ConversationChannel`), subscribing to the same `agents:{conversation_id}` topic. This plan's raw-WS `/cli/chat` path remains the right choice for the Go CLI (no Phoenix-channel wire protocol to implement client-side, header-based PAT auth at upgrade), and the two transports don't interact — but implementers should know both exist, and a future consolidation onto Channels is a legitimate refactor once a Go Phoenix-channel client is acceptable.
+
 **Repo:** All work is in `/Users/daniel/Development/magus`. (This plan doc lives in `magus-cli/docs/superpowers/plans/` as the planning hub, per the spec.)
 
 **Spec:** `magus-cli/docs/superpowers/specs/2026-06-02-magus-chat-skeleton-design.md`.
@@ -79,15 +81,17 @@ Expected: FAIL — `ArgumentError: unknown registry: Magus.Cli.ConnectionRegistr
 
 - [ ] **Step 3: Add the dependency**
 
-In `mix.exs`, add to `deps/0` (alongside `{:bandit, "~> 1.5"}`):
+In `mix.exs`, add to `deps/0` (alongside `{:bandit, "~> 1.5"}` at ~mix.exs:114):
 
 ```elixir
 {:websock_adapter, "~> 0.5"},
 ```
 
+> NOTE (re-verified 2026-07-26): `websock_adapter` is already a **transitive** dep (Phoenix 1.8 requires it; `websock_adapter 0.5.9` in mix.lock), so `WebSockAdapter.upgrade/4` is loadable today. Adding the explicit direct dep is belt-and-suspenders for a module we call directly — keep it.
+
 - [ ] **Step 4: Start the Registry in the supervision tree**
 
-In `lib/magus/application.ex`, add to the `children` list (near the other infra children, e.g. after the PubSub entry):
+In `lib/magus/application.ex`: the supervision list is no longer one flat `children = [...]` — it is composed via `child_specs/0` = `base_children() ++ instance_manager_children() ++ extra_children() ++ final_children()`. Add the Registry to **`base_children/0`**, right after `{Phoenix.PubSub, name: Magus.PubSub}` (~application.ex:123):
 
 ```elixir
 {Registry, keys: :unique, name: Magus.Cli.ConnectionRegistry},
@@ -113,7 +117,7 @@ git commit -m "feat(chat): add websock_adapter dep and CLI connection registry"
 - Create: `lib/magus/agents/tools/remote/read_file.ex`
 - Test: `test/magus/agents/tools/remote/read_file_test.exs`
 
-> Contract facts (verified): the ReAct runner invokes `run(params, context)` inside a `Task` with **`timeout: :infinity`** (no enforced wall-clock) and retries **only** `{:error, %{type: :timeout|:exception|:execution_error}}`. So this proxy self-enforces its timeout, **never raises**, and returns every failure as a terminal `{:ok, %{error: ...}}`. Params arrive string-keyed from the LLM; context uses atom keys (`Helpers.get_param/2` and `validate_context/2` handle both).
+> Contract facts (re-verified 2026-07-26): the outer `Task.async_stream` is still `timeout: :infinity` (`runner.ex` ~1076), **but since 2026-07-08 (`4e9ddd2a`) `safe_execute_module/4` ENFORCES the per-tool wall-clock** — it runs `run/2` in a `Task`, `Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill)` (`runner.ex` ~1749-1785). Effective bound: `tool_timeout_ms` = **120_000** on the ConversationAgent path (`conversation_agent.ex:67`), **15_000** default elsewhere. A brutal-killed proxy yields a **retryable** `{:error, %{type: :timeout}}` — exactly what this design must avoid. **Therefore the proxy MUST export `execution_timeout_ms/0` returning `:infinity`** (the runner honors per-tool overrides, `runner.ex` ~1434-1439) so its own `receive … after` self-timeout remains the sole bound and every failure stays a terminal `{:ok, %{error: ...}}`. The runner retries **only** `{:error, %{type: :timeout|:exception|:execution_error}}` (`retryable?/1` ~1445-1450; new `:caught`/`:task_exit` types are non-retryable). The proxy still **never raises** (a raise is rescued to `:exception` → retried). Params arrive string-keyed from the LLM; context uses atom keys (`Helpers.get_param` and `validate_context/2` handle both — note `get_param` is now `/2` and `/3`). The runner also injects `:__event_id__`, `:__tool_name__`, `:__conversation_id__` into the tool context (~1397-1401) — `__event_id__` matches the `tool.start`/`tool.complete` broadcast `event_id`, so forwarding it in `mcp_call` would let the CLI correlate the permission dialog with the timeline entry (closes the known cosmetic gap).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -147,7 +151,7 @@ defmodule Magus.Agents.Tools.Remote.ReadFileTest do
   test "returns content on an ok result" do
     sid = "s-#{System.unique_integer([:positive])}"
     stub_handler(sid, fn from, call_id ->
-      send(from, {:mcp_result, call_id, "ok", %{"content" => "hello\nworld"}})
+      send(from, {:mcp_result, call_id, "ok", %{"content" => "hello\nworld"}, nil})
     end)
 
     assert {:ok, %{content: "hello\nworld", path: "a.txt"}} =
@@ -165,7 +169,7 @@ defmodule Magus.Agents.Tools.Remote.ReadFileTest do
 
   test "denied maps to a terminal error" do
     sid = "s-#{System.unique_integer([:positive])}"
-    stub_handler(sid, fn from, call_id -> send(from, {:mcp_result, call_id, "denied", %{}}) end)
+    stub_handler(sid, fn from, call_id -> send(from, {:mcp_result, call_id, "denied", %{}, nil}) end)
 
     assert {:ok, %{error: msg}} = ReadFile.run(%{"path" => "secret"}, %{caller_session_id: sid})
     assert msg =~ "denied"
@@ -203,10 +207,13 @@ defmodule Magus.Agents.Tools.Remote.ReadFile do
 
   `run/2` resolves the caller's WebSocket handler from the connection registry
   (by `caller_session_id`, never by conversation), then does a synchronous
-  `send`/`receive` round-trip with a self-enforced timeout. The runner enforces
-  no wall-clock timeout, so we bound it here. All failures are returned as
-  terminal `{:ok, %{error: ...}}` (never raised, never `type: :timeout/:exception`)
-  so the ReAct loop does not retry a denied/absent/timed-out call.
+  `send`/`receive` round-trip with a self-enforced timeout. We opt out of the
+  runner's wall-clock (`execution_timeout_ms/0` -> :infinity) so our own
+  timeout is the sole bound — a runner brutal-kill would surface as a
+  RETRYABLE `{:error, %{type: :timeout}}`, which this design must avoid.
+  All failures are returned as terminal `{:ok, %{error: ...}}` (never raised,
+  never `type: :timeout/:exception`) so the ReAct loop does not retry a
+  denied/absent/timed-out call.
   """
 
   use Jido.Action,
@@ -223,6 +230,10 @@ defmodule Magus.Agents.Tools.Remote.ReadFile do
   import Magus.Agents.Tools.Helpers, only: [validate_context: 2, get_param: 2]
 
   @registry Magus.Cli.ConnectionRegistry
+
+  # Opt out of the runner's enforced wall-clock (safe_execute_module honors this
+  # per-tool override); the proxy's own receive-timeout below is the sole bound.
+  def execution_timeout_ms, do: :infinity
 
   def display_name, do: "Reading local file..."
   def summarize_output(%{content: c}) when is_binary(c), do: "#{c |> String.split("\n") |> length()} lines"
@@ -257,17 +268,18 @@ defmodule Magus.Agents.Tools.Remote.ReadFile do
     send(handler, {:mcp_call, call_id, "read_file", %{path: path}, self()})
 
     receive do
-      {:mcp_result, ^call_id, "ok", result} ->
+      {:mcp_result, ^call_id, "ok", result, _error} ->
         Process.demonitor(ref, [:flush])
         {:ok, %{path: path, content: pick(result, "content"), truncated: pick(result, "truncated") || false}}
 
-      {:mcp_result, ^call_id, "denied", _result} ->
+      {:mcp_result, ^call_id, "denied", _result, _error} ->
         Process.demonitor(ref, [:flush])
         {:ok, %{error: "User denied access to #{path}.", hint: "Ask the user to approve, or choose another file."}}
 
-      {:mcp_result, ^call_id, "error", result} ->
+      {:mcp_result, ^call_id, "error", _result, error} ->
         Process.demonitor(ref, [:flush])
-        {:ok, %{error: "Could not read #{path}: #{pick(result, "message") || "read failed"}"}}
+        detail = pick(error || %{}, "message") || "read failed"
+        {:ok, %{error: "Could not read #{path}: #{detail}"}}
 
       {:DOWN, ^ref, :process, ^handler, _reason} ->
         {:ok, %{error: "Local connection dropped before #{path} could be read."}}
@@ -463,9 +475,15 @@ defmodule Magus.Agents.Tools.Remote.Injection do
   end
 
   defp append_local_tools(signal, names) do
-    case Catalog.resolve(names) do
-      [] -> signal
-      mods -> Map.update(signal, :tools, mods, fn existing -> Enum.uniq((existing || []) ++ mods) end)
+    case {Map.get(signal, :tools), Catalog.resolve(names)} do
+      # No-op unless the signal already carries a non-empty base :tools list.
+      # A non-tool model yields `[]` from build_tools/3, so appending here would
+      # make [ReadFile] the *entire* toolset for a model that cannot use tools.
+      {existing, mods} when is_list(existing) and existing != [] and mods != [] ->
+        Map.put(signal, :tools, Enum.uniq(existing ++ mods))
+
+      {_existing, _mods} ->
+        signal
     end
   end
 
@@ -481,6 +499,8 @@ defmodule Magus.Agents.Tools.Remote.Injection do
 end
 ```
 
+> NOTE (`supports_tools?` interaction, verified in magus): `ToolBuilder.build_tools(_mode, _conv, false, ...)` returns `{[], %{}}` for a non-tool model (`lib/magus/agents/tools/tool_builder.ex` ~line 255), and `react_strategy.ex` uses `effective_tools = run_tools || config[:tools] || []` (~line 560). If `append_local_tools/2` unconditionally seeded `:tools` with `[ReadFile]`, a non-tool model would receive `read_file` as its entire toolset — a tool it cannot call. Gating the append on a pre-existing non-empty `:tools` list keeps the augment a strict no-op whenever the base agent decided the model gets no tools.
+
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `mix test test/magus/agents/tools/remote/injection_test.exs`
@@ -488,7 +508,7 @@ Expected: PASS (5 tests).
 
 - [ ] **Step 5: Wire it into Preflight (one line)**
 
-In `lib/magus/agents/plugins/support/preflight.ex`, in `build_react_signal/*`, the `react_signal` pipeline currently ends (around line 113-114):
+In `lib/magus/agents/plugins/support/preflight.ex`, in `build_react_signal/*`, the `react_signal` pipeline currently ends (re-verified 2026-07-26 at lines ~152-153):
 
 ```elixir
             |> maybe_put_runtime_field(:model_name, data)
@@ -502,6 +522,8 @@ Insert the augment step immediately before the `then(...)`:
             |> Magus.Agents.Tools.Remote.Injection.augment(data)
             |> then(&Jido.Signal.new!("ai.react.query", &1))
 ```
+
+> NOTE (2026-07-26): Preflight now builds a **second** `ai.react.query` signal for the `agent.resume` wake-up path (~preflight.ex:223-236). We deliberately do **not** augment it: wake-ups are autonomous turns with no live caller connection, so no local tools should be offered there. If a "local tools on resume" expectation ever arises, that builder is where it would silently be missing.
 
 - [ ] **Step 6: Verify compile + format + full Preflight tests still pass**
 
@@ -818,7 +840,7 @@ git commit -m "feat(chat): ChatSocket hello — register, conversation, server_h
 - Modify: `lib/magus_web/cli/chat_socket.ex`
 - Test: `test/magus_web/cli/chat_socket_mcp_test.exs`
 
-> The proxy (Task 2) does `send(handler, {:mcp_call, call_id, tool, params, from_pid})`. The handler pushes the `mcp_call` frame and records `call_id => from_pid`. On the `mcp_result` frame it sends `{:mcp_result, call_id, status, result}` back to that pid. This closes the round-trip the proxy's `receive` is waiting on.
+> The proxy (Task 2) does `send(handler, {:mcp_call, call_id, tool, params, from_pid})`. The handler pushes the `mcp_call` frame and records `call_id => from_pid`. On the `mcp_result` frame it sends `{:mcp_result, call_id, status, result, error}` back to that pid (the 5th element carries the top-level `error{code,message}` for non-ok results). This closes the round-trip the proxy's `receive` is waiting on.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -858,7 +880,7 @@ defmodule MagusWeb.Cli.ChatSocketMcpTest do
       })
 
     assert {:ok, new_state} = ChatSocket.handle_in({frame, [opcode: :text]}, state)
-    assert_receive {:mcp_result, "call-1", "ok", %{"content" => "hello"}}
+    assert_receive {:mcp_result, "call-1", "ok", %{"content" => "hello"}, _error}
     refute Map.has_key?(new_state.pending, "call-1")
   end
 
@@ -885,13 +907,15 @@ In `lib/magus_web/cli/chat_socket.ex`, replace the placeholder `handle_mcp_resul
         {:ok, state}
 
       {waiter, pending} ->
-        send(waiter, {:mcp_result, call_id, msg["status"], msg["result"] || %{}})
+        send(waiter, {:mcp_result, call_id, msg["status"], msg["result"] || %{}, msg["error"]})
         {:ok, %{state | pending: pending}}
     end
   end
 
   defp handle_mcp_result(_msg, state), do: {:ok, state}
 ```
+
+> NOTE (error payload shape, per spec section 4): on failure the CLI puts the detail in a **top-level** `error{code, message}` sibling of `result`, not inside `result`. The server must forward `msg["error"]` alongside `msg["result"]`, and the proxy reads `error["message"]`/`error["code"]` (falling back to `"read failed"`). Reading `result["message"]` would always miss the failure detail.
 
 and
 
@@ -1031,6 +1055,10 @@ and add a `handle_info/2` clause for PubSub broadcasts (place it BEFORE the exis
 and the mapper + frame helper (near the other private helpers):
 
 ```elixir
+  # CAVEAT: use the BROADCAST field names below (error_message, triggering_message_id,
+  # output_summary), NOT SseStreamer's payload[:message] / payload[:message_id] reads —
+  # those keys do not exist on the agent's broadcasts and resolve to nil. SseStreamer
+  # itself has this latent bug; do not mirror its field access, only its structure.
   defp map_signal(%{type: "text.chunk"} = p), do: {"text.delta", %{"delta" => p[:delta], "message_id" => p[:message_id]}}
   defp map_signal(%{type: "text.complete"} = p), do: {"text.done", %{"text" => p[:text], "message_id" => p[:message_id]}}
   defp map_signal(%{type: "tool.start"} = p), do: {"tool.start", %{"event_id" => p[:event_id], "tool_name" => p[:tool_name], "inputs" => p[:inputs]}}
@@ -1043,6 +1071,8 @@ and the mapper + frame helper (near the other private helpers):
     Jason.encode!(%{"type" => "chat_stream", "v" => 1, "event" => event, "data" => data})
   end
 ```
+
+> NOTE (signal families as of 2026-07-26): the `map_signal(_) -> nil` catch-all now deliberately drops a larger set of broadcast types: `thinking.chunk` (model reasoning — consider forwarding in v-next; SseStreamer already streams it), `turn.empty`, `turn.keepalive`, `turn.started`, `turn.completed`, `state.change`, `context.updated`, `run.*`, `tool.progress`, `tool.step.*`, `ui.open_brain_pane`. Dropping them is correct for the v1 skeleton; the catch-all + the "ignores unmapped signal types" test cover it. `summarize_tool_result` moved to `lib/magus/agents/plugins/support/persistence.ex` (~131-143; behavior unchanged — proxy terminal `{:ok, %{error: ...}}` still classifies `:success`, the known status-mapping caveat).
 
 - [ ] **Step 4: Run the stream test to verify it passes**
 
@@ -1072,7 +1102,7 @@ defmodule MagusWeb.Cli.ChatSocketChatTest do
     assert {:ok, _state} = ChatSocket.handle_in({frame, [opcode: :text]}, state)
 
     # The user message is persisted with our metadata (assert via the Chat read API).
-    messages = Magus.Chat.list_messages!(conv.id, actor: user)
+    messages = Magus.Chat.message_history!(conv.id, actor: user) |> Enum.to_list()
     user_msg = Enum.find(messages, &(&1.role == :user and &1.text == "hi there"))
     assert user_msg
     assert user_msg.metadata["caller_session_id"] == "s-1"
@@ -1081,7 +1111,7 @@ defmodule MagusWeb.Cli.ChatSocketChatTest do
 end
 ```
 
-> NOTE: confirm the exact message-read interface (`Magus.Chat.list_messages!/2` or equivalent) against `lib/magus/chat/chat.ex`; adjust the read call if the code interface differs. The async agent dispatch may run without an LLM expectation — if it logs a Mox error, add a benign stub: `expect(Magus.Test.Mocks.LLMMock, :chat, fn _, _, _ -> Magus.Test.Mocks.mock_stream_response("ok") end)` (see `test/support/mocks.ex` for the exact builder name/arity).
+> NOTE: the read interface is `Magus.Chat.message_history!` (code interface `:message_history`, action `:for_conversation`, re-verified 2026-07-26 at `lib/magus/chat/chat.ex:155`); `list_messages!` does not exist. The action has `pagination keyset?: true, required?: false`, so a default (no `page:`) call returns a **plain list** — the `Enum.to_list()` above is a harmless no-op kept for safety if a `page:` option is ever added. The async agent dispatch may run without an LLM expectation — if it logs a Mox error, add a benign stub: `expect(Magus.Test.Mocks.LLMMock, :chat, fn _, _, _ -> Magus.Test.Mocks.mock_stream_response("ok") end)` (see `test/support/mocks.ex` for the exact builder name/arity).
 
 - [ ] **Step 6: Run the chat test to verify it passes**
 
@@ -1170,7 +1200,7 @@ end
 
 - [ ] **Step 4: Add the route + pipeline**
 
-In `lib/magus_web/router.ex`, add a pipeline (near the `:api_v2` pipeline) and a scope:
+The router was split (re-verified 2026-07-26): `lib/magus_web/router.ex` is now a thin composer (`use MagusWeb.CoreRouter` + `core_pipelines()` + `core_routes()`) that also owns the SPA catch-all `get "/*path", NextUiController, :spa`. Add the pipeline + scope in **`lib/magus_web/core_router.ex`** — pipeline near `:api_v2` (~core_router.ex:169-173, which it mirrors), scope inside `core_routes()` so it registers **before** the SPA catch-all swallows the path:
 
 ```elixir
   pipeline :cli_socket do
@@ -1183,7 +1213,7 @@ In `lib/magus_web/router.ex`, add a pipeline (near the `:api_v2` pipeline) and a
   end
 ```
 
-(Keep this separate from the existing browser-session `scope "/cli"`, which uses `[:browser, :require_auth_browser]`.)
+(Keep this separate from the existing browser-session `scope "/cli"` at ~core_router.ex:447-453 (`/cli/authorize`, `[:browser, :require_auth_browser]`) — distinct path, no conflict. Note we deliberately do NOT add `RequireTokenScope` (the `:api_v2` second plug): it allows GET on `:read` tokens anyway, and the v1 decision is any valid token may chat. The token lookup already enforces revocation/expiry at query level.)
 
 - [ ] **Step 5: Run test to verify it passes**
 
@@ -1217,14 +1247,14 @@ defmodule Magus.Agents.Tools.Remote.NoPersistTest do
     # Base tools are empty in the agent definition; local tools only ever arrive
     # per-turn via run_tools, so a thawed agent (restored from base config)
     # cannot expose read_file without a live connection re-injecting it.
-    strategy_opts = Magus.Agents.ConversationAgent.__jido_strategy_opts__()
+    strategy_opts = Magus.Agents.ConversationAgent.strategy_opts()
     base_tools = Keyword.get(strategy_opts, :tools, [])
     refute Magus.Agents.Tools.Remote.ReadFile in base_tools
   end
 end
 ```
 
-> NOTE: confirm the accessor for the agent's compiled strategy opts. If `__jido_strategy_opts__/0` is not exported by `use Jido.Agent`, assert against the source instead: read `lib/magus/agents/conversation_agent.ex` and assert the `tools: []` in the strategy config — or grep-assert no `Remote.` module appears in the agent's `plugins`/strategy block. The guarantee is structural (base toolset is empty), so a source-level assertion is acceptable.
+> NOTE: `strategy_opts/0` is the accessor exported by `use Jido.Agent` (verified — used in `test/magus/agents/conversation_agent_test.exs:18`); `__jido_strategy_opts__/0` does not exist. It returns the compiled strategy opts; assert `Keyword.get(strategy_opts, :tools, [])` contains no `Remote.` module. The guarantee is structural (base toolset is empty), so a source-level assertion against `conversation_agent.ex` `tools: []` is an equivalent fallback.
 
 - [ ] **Step 2: Run it**
 

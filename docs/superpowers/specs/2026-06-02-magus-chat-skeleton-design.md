@@ -103,10 +103,25 @@ JSON text frames over WSS. Every frame has `type` and protocol version `v` (int)
 | `chat_stream` | srv→CLI | streamed output + lifecycle | `event`: `text.delta`/`text.done`/`tool.start`/`tool.complete`/`turn.done`/`error`; `data` |
 | `mcp_call` | srv→CLI | tool invocation request | `call_id`, `tool_name`, `params` |
 | `mcp_result` | CLI→srv | tool result | `call_id`, `status`: `ok`/`error`/`denied`; `result` or `error:{code,message}` |
+| `error` | srv→CLI | transport/protocol error (auth/forbidden/bad_frame/hello rejection) | `code`, `message` (plus `v`) |
+
+> **Two distinct error surfaces.** The top-level `error` frame above is a transport/protocol-level failure (auth, forbidden, malformed frame, `hello` rejection) and is **not** the same as `chat_stream{event:"error"}`, which reports an in-turn agent/stream error.
+
+**`chat_stream.data` keys per event:**
+
+- `text.delta` → `{delta, message_id}`
+- `text.done` → `{text, message_id}`
+- `tool.start` → `{event_id, tool_name, inputs}`
+- `tool.complete` → `{event_id, tool_name, status, summary}`
+- `turn.done` → `{message_id}`
+- `error` → `{message}`
+
+The canonical summary key on the wire is **`summary`**. (The internal magus signal field is `output_summary`; the forwarder maps `output_summary` → `summary` when encoding `tool.complete`.)
 
 - `chat_stream` events map from the existing PubSub signals on `agents:{conversation_id}` (verify exact signal names/payloads — §8).
+- **`mcp_result` error vs result:** for a non-`ok` `mcp_result`, the failure detail lives in a **top-level `error:{code,message}` sibling of `result`** (`result` is omitted), not inside `result`. The server **must** consume `error{}` for `error`/`denied` statuses (never `result.message`).
 - Heartbeat: WS ping/pong (lib-level), CLI pings ~25s.
-- **Schema source of truth (v1):** one shared protocol section in this doc, hand-mirrored as Go structs and Elixir structs. Codegen is premature for 6 message types.
+- **Schema source of truth (v1):** one shared protocol section in this doc, hand-mirrored as Go structs and Elixir structs. Codegen is premature for this handful of frame types.
 
 ---
 
@@ -183,10 +198,10 @@ Tool risk tiers: *read* (`read_file`, `list_files`, `grep`) · *write* (`write_f
 
 | Module | Responsibility |
 |---|---|
-| upgrade plug | extract Bearer → validate (reuse `ApiTokenAuthPlug` logic) → assign user/scope/workspace or halt `401`; then `WebSockAdapter.upgrade` |
+| upgrade plug | extract Bearer → validate (reuse `ApiTokenAuthPlug` logic) → assign `current_user` + `current_token` (the token carries scope as an attribute and a loaded workspace via the `:get_by_hash` action) or halt `401`; then `WebSockAdapter.upgrade` |
 | `MagusWeb.ChatSocket` (WebSock) | `handle_in`: `hello` → create/load conversation + register session in Registry + reply `server_hello`; `chat` → drive a turn (inject `run_tools` + `run_tool_context`); `mcp_result` → reply to the waiting proxy. `handle_info`: PubSub `agents:{id}` → encode `chat_stream`; `{:mcp_call,…}` from a proxy → push. `terminate`: drop Registry binding |
 | connection `Registry` | `caller_session_id → connection pid`; the proxy looks up the socket, the socket holds `call_id → from` to reply on `mcp_result`. Bind to **pid** → fail-closed if absent. Monitor the pid so a `:DOWN` aborts in-flight calls |
-| `Magus.Agents.Tools.Remote.ReadFile` | proxy `Jido.Action` (`name: "read_file"`, real `path` schema). `run(%{path}, ctx)`: `ctx.caller_session_id` → Registry → handler pid; no conn → immediate terminal error; else `send(handler, {:mcp_call, …, self()})` + `receive … after @timeout` (the proxy **self-enforces** the timeout — the runner does **not**: `Task.async_stream` is `timeout: :infinity` and discards the per-tool timeout); `Process.monitor` the handler so a `:DOWN` aborts the wait. Map `denied`/timeout/no-conn to **terminal** `{:ok, %{error: …}}` (never raise). **Relays only — enforces no policy** (the CLI does) |
+| `Magus.Agents.Tools.Remote.ReadFile` | proxy `Jido.Action` (`name: "read_file"`, real `path` schema). `run(%{path}, ctx)`: `ctx.caller_session_id` → Registry → handler pid; no conn → immediate terminal error; else `send(handler, {:mcp_call, …, self()})` + `receive … after @timeout` (the proxy **self-enforces** the timeout and exports `execution_timeout_ms/0 → :infinity` to opt out of the runner's wall-clock — since 2026-07 `safe_execute_module` *does* enforce `tool_timeout_ms` and a brutal-killed tool yields a **retryable** `:timeout`, which this design must avoid); `Process.monitor` the handler so a `:DOWN` aborts the wait. Map `denied`/timeout/no-conn to **terminal** `{:ok, %{error: …}}` (never raise). **Relays only — enforces no policy** (the CLI does) |
 | stream forwarder | subscribes `agents:{conversation_id}`, maps `%Phoenix.Socket.Broadcast{payload}` → `chat_stream` (mirror `sse_streamer.ex`). **Caller-scoping rule:** tool events carry **no** `run_id` (only an `event_id` hashed from `call_id`), but the worker is **single-flight per conversation**, so correlation is topic + lifecycle envelope (`turn.started` carries the raw `request_id`; terminal on `response.complete`). For multiplayer later: the initiating socket knows its `request_id`, matches `turn.started`, forwards that turn's tool events to itself, broadcasts only final text. In single-player v1 it's one connection — forward all |
 
 - **Conversation:** `conversation:new` creates a fresh single-owner `Conversation`; `resume:"<id>"` loads it **only if the token-user owns it** (else reject). Reuse the existing `ConversationAgent` (id `conv:<uuid>`) creation path.
@@ -213,7 +228,7 @@ Follows the existing `internal/` layout.
 
 ## 8. Error handling & edge cases
 
-- **Tool timeout:** the runner enforces **no** wall-clock timeout (`Task.async_stream` is `timeout: :infinity`; the per-tool `timeout_ms` is discarded by `safe_execute_module`). The proxy therefore bounds its own `receive … after @timeout` and returns a terminal `{:ok, %{error: "tool timed out"}}` the LLM can read.
+- **Tool timeout:** since 2026-07 the runner **does** enforce the per-tool wall-clock (`safe_execute_module` runs `run/2` in a Task with `Task.yield(timeout) || brutal_kill`; effective `tool_timeout_ms` is 120s on ConversationAgent, 15s default) — and a killed tool yields a **retryable** `{:error, %{type: :timeout}}`. The proxy therefore exports `execution_timeout_ms/0 → :infinity` (a per-tool override the runner honors) so its own `receive … after @timeout` is the sole bound, returning a terminal `{:ok, %{error: "tool timed out"}}` the LLM can read.
 - **User deny:** `mcp_result{denied}` → proxy returns a clear "user denied" the LLM can adapt to; marked **non-retryable** (don't let `tool_max_retries` re-ask a denied op).
 - **Socket drops mid-tool-call:** monitored pid `:DOWN` → proxy errors immediately (fail-closed); runner continues or fails the turn.
 - **Socket drops mid-turn (no pending call):** basic reconnect with backoff. v1 may drop in-flight streamed output; the conversation is persisted, so on reconnect the user can re-fetch history / re-ask. Sophisticated resume deferred.
@@ -239,9 +254,9 @@ Follows the existing `internal/` layout.
 All open items were resolved by reading the `magus` code. Exact references in the implementation plan (`docs/superpowers/plans/2026-06-02-magus-chat-server-bridge.md`).
 
 - **✅ Injection wiring** — drive turns via `Magus.Chat.send_user_message(%{conversation_id, text, metadata}, actor: user)` (persists the message, lazily creates the conversation, resolves routing, bootstraps + signals the agent). Carry `caller_session_id` + `local_tools` (names) in `message.metadata`; a small additive change to `Magus.Agents.Dispatcher.build_signal_data/3` resolves the names → modules and sets the per-turn `tools` + `tool_context`. `Preflight.build_react_signal` already passes `tools`/`tool_context` from the signal data through to `ai.react.query` → `run_tools`/`run_tool_context` (cleared per-turn). **Do not** use `ai.react.set_tool_context` (it persists into base context).
-- **✅ Round-trip vs runner** — `runner.ex` runs tools in `Task.async_stream` with `timeout: :infinity`; the per-tool timeout is **discarded**. Only `{:error, %{type: :timeout|:exception|:execution_error}}` is retried (`retryable?/1`). So: proxy self-enforces its timeout; returns terminal `{:ok, %{error: …}}` for denied/no-conn/timeout; **never raises** (raising → `:exception` → retried).
+- **✅ Round-trip vs runner** *(updated 2026-07-26)* — `runner.ex` runs tools in `Task.async_stream` with `timeout: :infinity`, but `safe_execute_module` now **enforces** the per-tool `tool_timeout_ms` (Task.yield + brutal_kill; 120s on ConversationAgent, 15s default) — a killed tool is a **retryable** `:timeout`. The proxy therefore exports `execution_timeout_ms/0 → :infinity` (runner-honored per-tool override) so its self-timeout stays the sole bound. Only `{:error, %{type: :timeout|:exception|:execution_error}}` is retried (`retryable?/1`; new `:caught`/`:task_exit` types are non-retryable). So: proxy self-enforces its timeout; returns terminal `{:ok, %{error: …}}` for denied/no-conn/timeout; **never raises** (raising → `:exception` → retried).
 - **✅ Stream signal mapping** — topic `agents:{conversation_id}`, event `"agent_signal"`, payloads `%{type: …}` (atom keys). Map `text.chunk`→`text.delta`, `text.complete`→`text.done`, `tool.start`/`tool.complete` (paired by `event_id`), `response.complete`→`turn.done` (terminal), `error` (field `error_message`). Mirror `MagusWeb.Api.Controllers.SseStreamer.handle_payload/4`. Tool events lack `run_id`; single-flight worker + `turn.started.request_id` is the correlation (see §6).
-- **✅ Resume ownership** — `Magus.Chat.get_conversation(id, actor: token.user)`; the Ash read policy rejects non-owned conversations. Owner field is `conversation.user_id`.
+- **✅ Resume ownership** *(updated 2026-07-26)* — `Magus.Chat.get_conversation(id, actor: token.user)`; the Ash read policy rejects **unrelated** actors (owner field `conversation.user_id`). Note the policy has broadened: accepted `ConversationMember`s and workspace grantees can also read, so "resume" is now owner-or-participant, not strictly owner-only. The v1 rejection test (unrelated user → rejected) still holds; caller-scoped tool routing (§5.2) is what keeps multi-participant access safe.
 - **✅ Token scope** — `token.scope ∈ {:read, :write}` is preloaded by `ApiTokenAuthPlug`. v1 decision: **any valid token may chat** (`read_file` is read-only and CLI-gated); write-scoped enforcement for mutating tools is deferred with those tools.
 - **✅ Hibernation** — resolved by per-turn injection (no shared/persisted local-tool state). Plan includes a regression test that a thawed agent exposes no local tools.
 

@@ -29,6 +29,7 @@ type Profile struct {
 type Config struct {
 	DefaultProfile string             `toml:"default_profile"`
 	Profiles       map[string]Profile `toml:"profiles"`
+	Chat           ChatConfig         `toml:"chat,omitempty"`
 }
 
 // Load reads from the default config directory.
@@ -98,6 +99,11 @@ func (c *Config) saveTo(dir string) error {
 	// the perms set by WriteFile.
 	return os.Chmod(path, configFileMode)
 }
+
+// DefaultDir is the exported view of defaultDir: the directory the CLI reads
+// and writes its config in, so callers can place sibling artifacts (e.g. the
+// chat audit log) next to it.
+func DefaultDir() (string, error) { return defaultDir() }
 
 func defaultDir() (string, error) {
 	if env := os.Getenv("MAGUS_CONFIG_DIR"); env != "" {

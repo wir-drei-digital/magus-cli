@@ -443,7 +443,9 @@ git commit -m "feat(chat): add [chat.permissions] config schema"
 - Create: `internal/localtool/confine.go`
 - Test: `internal/localtool/confine_test.go`
 
-> Two layers: a **lexical** check (rejects `../` traversal and absolute-outside) plus a **symlink** check (rejects a symlink inside the root that resolves outside). Nonexistent files pass confinement and fail later as "not found".
+> Three layers: a **lexical** check (rejects `../` traversal and absolute-outside), a **symlink** check on existing targets (rejects a symlink inside the root that resolves outside), plus a **nonexistent-leaf ancestor** check (when the leaf does not exist, resolve the deepest existing ancestor and re-verify containment, so a symlinked parent directory pointing outside root cannot be used as a creation target). Nonexistent files pass confinement (with their parent verified) and fail later as "not found".
+>
+> **Test to add before `write_file` lands:** symlinked-parent / nonexistent-leaf — create `outside := t.TempDir()`, symlink `root/linkdir -> outside`, then assert `Confine(root, "linkdir/new.txt")` returns `ErrEscapesRoot` (the leaf does not exist, but the parent resolves outside root). This guards the deferred `write_file` write-outside-root hole.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -558,6 +560,30 @@ func Confine(root, path string) (string, error) {
 		return real, nil
 	}
 
+	// Layer 3: nonexistent leaf — the lexical check above only proves the
+	// *clean* path is inside root, NOT that the path it would be created at
+	// stays inside root once symlinks in its existing prefix are resolved.
+	// e.g. root/linkdir is a symlink to /outside; root/linkdir/new.txt does
+	// not exist, so EvalSymlinks(target) fails and we fall through here, but
+	// the parent resolves OUTSIDE root. Resolve the deepest EXISTING ancestor
+	// and re-check containment of that resolved ancestor before accepting the
+	// lexical target. (Benign for read_file — the leaf must exist — but a
+	// write-outside-root hole once the deferred write_file lands.)
+	ancestor := filepath.Dir(target)
+	for {
+		if real, err := filepath.EvalSymlinks(ancestor); err == nil {
+			if !within(absRoot, real) {
+				return "", ErrEscapesRoot
+			}
+			break
+		}
+		parent := filepath.Dir(ancestor)
+		if parent == ancestor {
+			break // reached filesystem root without an existing ancestor
+		}
+		ancestor = parent
+	}
+
 	return target, nil
 }
 
@@ -592,6 +618,8 @@ git commit -m "feat(chat): path confinement against traversal and symlink escape
 - Test: `internal/localtool/readfile_test.go`
 
 > `Plan` does the tool-specific safety (confinement) and produces `Display` — the **client-canonical** string shown at approval. `Execute` reads only what `Plan` resolved. This is the anti-spoofing seam.
+>
+> **Security (TOCTOU):** confinement runs at `Plan` time, but `Execute` runs after the human-approval window. Re-opening by name re-resolves symlinks, so a racing local process could swap a component to point outside root between approval and open. `Execute` therefore opens through **`os.Root`** (Go 1.24+; kernel-enforced `openat2`/`RESOLVE_BENEATH`-style traversal): `os.OpenRoot(rf.Root)`, then open the path *relative to the resolved root* inside it. Every component — prefix included — is resolved beneath the root fd, closing both the final-component swap and the parent-directory swap race that an `O_NOFOLLOW`+fstat scheme leaves open. Portable: works on Windows too (and rejects reserved device names), so no build-tagged split is needed. *(Decision 2026-08-05: supersedes the original O_NOFOLLOW+fstat design after review verified `os.Root` availability in the toolchain.)*
 
 - [ ] **Step 1: Write the failing test**
 
@@ -724,6 +752,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 )
 
 // ReadFile reads a file on the local machine, confined to Root and capped at MaxBytes.
@@ -759,7 +788,32 @@ func (rf *ReadFile) Plan(params map[string]any) (Plan, error) {
 }
 
 func (rf *ReadFile) Execute(plan Plan) (any, error) {
-	f, err := os.Open(plan.path)
+	// TOCTOU note: `plan.path` is the symlink-resolved path produced by Plan
+	// (confinement happened then). Between Plan and Execute lies the human-
+	// approval window, and re-opening by name re-resolves symlinks at open
+	// time — a racing local process could swap any component to point outside
+	// root after approval but before the open. Open through os.Root instead:
+	// every component (prefix included) is kernel-resolved BENEATH the root
+	// directory fd, so a swapped-in symlink escaping root fails at open rather
+	// than being followed. plan.path is under the *resolved* root (Confine
+	// resolves the root itself), so relativize against that.
+	resolvedRoot, err := filepath.Abs(rf.Root)
+	if err != nil {
+		return nil, err
+	}
+	if real, rerr := filepath.EvalSymlinks(resolvedRoot); rerr == nil {
+		resolvedRoot = real
+	}
+	rel, err := filepath.Rel(resolvedRoot, plan.path)
+	if err != nil {
+		return nil, ErrEscapesRoot
+	}
+	r, err := os.OpenRoot(resolvedRoot)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	f, err := r.Open(rel)
 	if err != nil {
 		return nil, err
 	}
@@ -802,6 +856,8 @@ git commit -m "feat(chat): tool contract + confined size-capped read_file"
 **Files:**
 - Create: `internal/localtool/policy.go`
 - Test: `internal/localtool/policy_test.go`
+
+> **Security (allow-rule boundary):** `Decide` matches persisted allow rules on **path-segment boundaries** via `within()` (reused from `confine.go`), never a raw `strings.HasPrefix`. A raw prefix would let "allow always" on `/proj/a.txt` silently auto-approve `/proj/a.txt.bak`, `/proj/a.txtsecrets`, etc. Correspondingly, `AddAllow` persists the **exact resolved file path** as the rule's `PathPrefix` (`within()` also matches the equal case), so an allow-always on `/proj/a.txt` matches only `/proj/a.txt` — not `/proj/a.txt.bak` or any sibling. A per-file approval is never widened into a whole-directory grant.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -867,8 +923,6 @@ Expected: FAIL — `undefined: NewPolicy`.
 package localtool
 
 import (
-	"strings"
-
 	"github.com/wir-drei-digital/magus-cli/internal/config"
 )
 
@@ -892,8 +946,19 @@ func NewPolicy(perms config.Permissions) *Policy { return &Policy{perms: perms} 
 func (p *Policy) Permissions() config.Permissions { return p.perms }
 
 func (p *Policy) Decide(plan Plan) Decision {
+	// Explicit deny wins: a tier the user set to "deny" is a kill switch that
+	// no persisted allow-always rule may override (IAM/ACL convention; decided
+	// 2026-08-06). Rules only ever upgrade prompt->allow, never deny->allow.
+	if p.tierDefault(plan.Tier) == "deny" {
+		return DecisionDeny
+	}
 	for _, r := range p.perms.Allow {
-		if r.Tool == plan.Tool && r.PathPrefix != "" && strings.HasPrefix(plan.MatchPath, r.PathPrefix) {
+		// Match on path-segment boundaries, NOT a raw string prefix. A raw
+		// strings.HasPrefix lets an "allow always" on /proj/a.txt silently
+		// auto-approve /proj/a.txt.bak, /proj/a.txtsecrets, etc. within()
+		// (from confine.go) accepts only when MatchPath == prefix or MatchPath
+		// is under prefix on a separator boundary.
+		if r.Tool == plan.Tool && r.PathPrefix != "" && within(r.PathPrefix, plan.MatchPath) {
 			return DecisionAllow
 		}
 	}
@@ -907,7 +972,16 @@ func (p *Policy) Decide(plan Plan) Decision {
 	}
 }
 
-// AddAllow persists an "allow always" rule for this exact tool+path.
+// AddAllow persists an "allow always" rule scoped to this exact tool+path.
+//
+// Decide matches PathPrefix on segment boundaries via within(), and within()
+// also matches the equal case (rel == "."). Persisting the exact resolved path
+// therefore scopes the rule to that one file: an "allow always" on /proj/a.txt
+// matches /proj/a.txt and nothing else — NOT /proj/a.txt.bak, NOT siblings.
+// This is the tightest, least-surprising "allow always for THIS file"
+// semantics. (A broader "allow this directory" grant would store a parent
+// directory as the prefix; we deliberately do not, so a per-file approval is
+// never silently widened into a whole-subtree grant.)
 func (p *Policy) AddAllow(plan Plan) {
 	p.perms.Allow = append(p.perms.Allow, config.AllowRule{Tool: plan.Tool, PathPrefix: plan.MatchPath})
 }
@@ -1136,14 +1210,16 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // AuditEntry is one local tool-invocation decision record.
 type AuditEntry struct {
-	Tool           string `json:"tool"`
-	Display        string `json:"display"`
-	Decision       string `json:"decision"` // allow | deny | error
-	ConversationID string `json:"conversation_id,omitempty"`
+	TS             time.Time `json:"ts"` // stamped UTC by Record when zero (spec §audit)
+	Tool           string    `json:"tool"`
+	Display        string    `json:"display"`
+	Decision       string    `json:"decision"` // allow | deny | error
+	ConversationID string    `json:"conversation_id,omitempty"`
 }
 
 // Auditor records tool decisions locally.
@@ -1156,7 +1232,10 @@ type FileAudit struct {
 	Path string
 }
 
-func (a *FileAudit) Record(entry AuditEntry) error {
+func (a *FileAudit) Record(entry AuditEntry) (err error) {
+	if entry.TS.IsZero() {
+		entry.TS = time.Now().UTC()
+	}
 	if err := os.MkdirAll(filepath.Dir(a.Path), 0o700); err != nil {
 		return err
 	}
@@ -1164,7 +1243,19 @@ func (a *FileAudit) Record(entry AuditEntry) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	// Close errors matter here: an audit Record that "succeeded" without the
+	// bytes reaching the filesystem is the one failure mode a security log
+	// cannot have.
+	defer func() {
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+	}()
+	// The perm arg above applies only at creation; tighten a pre-existing file
+	// (same precedent as config saveTo).
+	if err := os.Chmod(a.Path, 0o600); err != nil {
+		return err
+	}
 
 	line, err := json.Marshal(entry)
 	if err != nil {
@@ -1906,7 +1997,11 @@ func runChat(ctx context.Context, opts chatOptions) error {
 		Audit:    &localtool.FileAudit{Path: filepath.Join(opts.ConfigDir, "chat-audit.jsonl")},
 		OnAllowAlways: func(p *localtool.Policy) {
 			if c, err := config.Load(); err == nil {
-				c.Chat.Permissions = p.Permissions()
+				// Write back ONLY the allow rules. Assigning the whole
+				// Permissions struct would clobber tier defaults the user
+				// edited mid-session (e.g. flipping read="deny") with this
+				// session's stale copy.
+				c.Chat.Permissions.Allow = p.Permissions().Allow
 				_ = c.Save()
 			}
 		},
@@ -2019,6 +2114,14 @@ git add -A && git commit -m "chore(chat): verification fixups"
 ```
 
 ---
+
+## Security & threat model
+
+- **Threat model:** single-user developer machine. The cloud agent is semi-trusted (its tool proposals are policy-gated and human-approved); a local attacker who already runs code as the same user is largely out of scope, which bounds the severity of the residual races below.
+- **Path confinement (Task 4):** three layers — lexical (`../`/absolute-outside), symlink-on-existing-target, and nonexistent-leaf ancestor resolution. The third layer closes the symlinked-parent / nonexistent-leaf write-outside-root hole that lands with the deferred `write_file` (test noted in Task 4).
+- **Execute TOCTOU (Task 5):** confinement happens at `Plan` time but `Execute` runs after the human-approval window. `read_file` opens through `os.Root` (`os.OpenRoot` on the resolved confinement root, then a root-relative open): the kernel resolves every component beneath the root fd, closing both the final-component and parent-directory swap races. Portable across darwin/linux/windows — no build-tag split. Residual: bind mounts, `/proc` magic links, and hardlinks inside root that point at content outside are not prohibited by `os.Root` (documented library caveats); accepted under the single-user threat model. *(2026-08-05: supersedes the original O_NOFOLLOW+fstat design.)*
+- **Allow-rule boundary (Task 6):** persisted "allow always" rules match on path-segment boundaries via `within()`, never raw `strings.HasPrefix`, and `AddAllow` stores the **exact resolved file path** (`within()` matches the equal case) — so an allow on `/proj/a.txt` matches only `/proj/a.txt`, never `/proj/a.txt.bak` or a sibling. (A whole-directory grant would store a parent dir instead; we don't, to avoid widening a per-file approval.) **Explicit deny wins** (2026-08-06): a tier set to `"deny"` short-circuits before the rule scan — no persisted rule can override the kill switch — and Task 11's allow-always save-back writes only the `Allow` slice so mid-session tier edits are never clobbered.
+- **Anti-spoofing:** the approver only ever renders `plan.Display` (built client-side in `Tool.Plan`); no server-supplied path reaches the prompt (Tasks 5, 7, 9).
 
 ## Self-review notes (coverage vs. spec §5.3, §7)
 
