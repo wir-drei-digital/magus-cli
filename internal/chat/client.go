@@ -47,9 +47,9 @@ func Dial(ctx context.Context, wsURL, token, userAgent string) (*Client, error) 
 	hdr.Set("Authorization", "Bearer "+token)
 	hdr.Set("User-Agent", userAgent)
 
-	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{HTTPHeader: hdr})
+	conn, resp, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{HTTPHeader: hdr})
 	if err != nil {
-		return nil, fmt.Errorf("ws dial: %w", err)
+		return nil, dialErr(resp, err)
 	}
 	conn.SetReadLimit(8 << 20)
 
@@ -68,8 +68,31 @@ func Dial(ctx context.Context, wsURL, token, userAgent string) (*Client, error) 
 
 func (c *Client) Events() <-chan Event { return c.events }
 
+// dialErr explains the two handshake rejections a user can actually fix. The
+// transport's own message stops at "got 403", which says nothing about which
+// token is wrong or what to do about it.
+func dialErr(resp *http.Response, err error) error {
+	if resp != nil {
+		switch resp.StatusCode {
+		case http.StatusForbidden:
+			return fmt.Errorf("ws dial: this token lacks write scope (insufficient_scope); chat needs a write-scoped token — run `magus login` again: %w", err)
+		case http.StatusUnauthorized:
+			return fmt.Errorf("ws dial: this token is invalid or expired; run `magus login`: %w", err)
+		}
+	}
+	return fmt.Errorf("ws dial: %w", err)
+}
+
 // Send marshals and enqueues an outbound frame.
+//
+// mcp_result frames pass through FitMcpResult first: the server caps inbound
+// frames at 1MB and CLOSES the connection on oversize, so the budget is enforced
+// here — the one choke point every front-end shares — instead of being trusted
+// to each producer (the ACP bridge forwards editor reads it never sized).
 func (c *Client) Send(frame any) error {
+	if res, ok := frame.(McpResult); ok {
+		frame = FitMcpResult(res)
+	}
 	data, err := Encode(frame)
 	if err != nil {
 		return err

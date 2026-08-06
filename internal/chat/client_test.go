@@ -29,6 +29,93 @@ func TestFrameErr(t *testing.T) {
 	}
 }
 
+func TestDialSurfacesScopeAndAuthFailures(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		want   []string
+	}{
+		{"read-scoped token", http.StatusForbidden, []string{"insufficient_scope", "write", "magus login"}},
+		{"invalid token", http.StatusUnauthorized, []string{"expired", "magus login"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, http.StatusText(tc.status), tc.status)
+			}))
+			defer srv.Close()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			_, err := Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http")+"/cli/chat", "tok", "magus-cli/test")
+			if err == nil {
+				t.Fatal("expected a dial error")
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not mention %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// The server closes the connection on frames over 1MB, so Send — the single
+// choke point both front-ends share — must fit every mcp_result to the budget.
+func TestClientSendFitsOversizedMcpResult(t *testing.T) {
+	gotFrame := make(chan []byte, 1)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close(websocket.StatusNormalClosure, "")
+		c.SetReadLimit(8 << 20)
+		_, data, err := c.Read(r.Context())
+		if err != nil {
+			return
+		}
+		gotFrame <- data
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cli, err := Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http")+"/cli/chat", "tok", "magus-cli/test")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer cli.Close()
+
+	content := strings.Repeat("\x1b", 300*1024) // 1.8MB once escaped
+	if err := cli.Send(McpResult{CallID: "c1", Status: "ok", Result: map[string]any{"content": content}}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	select {
+	case data := <-gotFrame:
+		if len(data) > maxResultFrameBytes {
+			t.Fatalf("wire frame is %d bytes, budget is %d", len(data), maxResultFrameBytes)
+		}
+		var res McpResult
+		if err := decodePayload(data, &res); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if res.Result["truncated"] != true {
+			t.Errorf("truncated = %v, want true", res.Result["truncated"])
+		}
+		if out, _ := res.Result["content"].(string); !strings.HasPrefix(content, out) || out == "" {
+			t.Errorf("content is not a non-empty prefix of the original (%d bytes)", len(out))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server never received the frame")
+	}
+}
+
 func TestClientRoundTrip(t *testing.T) {
 	gotResult := make(chan McpResult, 1)
 

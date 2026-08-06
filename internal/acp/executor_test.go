@@ -4,6 +4,7 @@ package acp
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	sdk "github.com/coder/acp-go-sdk"
@@ -104,6 +105,35 @@ func TestExecutorApprovedReads(t *testing.T) {
 	}
 	if ed.readPath != "mix.exs" {
 		t.Errorf("editor read wrong path: %q", ed.readPath)
+	}
+}
+
+// The editor's read is unbounded — it can hand back a whole binary file — and
+// the server closes the connection on frames over 1MB. The executor fits its
+// result at the producer too, so the invariant does not depend on which
+// chat.CloudConn implementation happens to be wired up.
+func TestExecutorFitsOversizedEditorRead(t *testing.T) {
+	// 300KiB of ESC is 1.8MB once JSON-escaped.
+	content := strings.Repeat("\x1b", 300*1024)
+	ed := &fakeEditor{permOptionID: "allow", fileContent: content}
+	res := newExec(ed).Handle(chat.McpCall{CallID: "1", ToolName: "read_file", Params: map[string]any{"path": "big.bin"}})
+
+	if res.Status != "ok" {
+		t.Fatalf("expected ok, got %+v", res)
+	}
+	if res.Result["truncated"] != true {
+		t.Errorf("truncated = %v, want true", res.Result["truncated"])
+	}
+	data, err := chat.Encode(res)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if len(data) >= 1<<20 {
+		t.Errorf("encoded result is %d bytes; the server closes the connection over 1MB", len(data))
+	}
+	out, _ := res.Result["content"].(string)
+	if out == "" || !strings.HasPrefix(content, out) {
+		t.Errorf("content is not a non-empty prefix of the file (%d bytes)", len(out))
 	}
 }
 

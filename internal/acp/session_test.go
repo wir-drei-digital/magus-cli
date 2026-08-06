@@ -203,3 +203,38 @@ func TestSessionDispatchesMcpCallToExecutor(t *testing.T) {
 		t.Fatal("executor result never sent back to cloud")
 	}
 }
+
+func TestSessionMcpResultStaysUnderTheFrameCap(t *testing.T) {
+	// The result reaching the cloud connection must fit the server's 1MB frame
+	// cap whatever the editor returned — asserted here on the path the ACP
+	// bridge actually takes, with a CloudConn that does no fitting of its own.
+	cloud := newFakeCloud()
+	ed := &fakeEditor{permOptionID: "allow", fileContent: strings.Repeat("\x1b", 300*1024)}
+	s := &Session{
+		ID: "conv1", ChatSID: "sid1", Cloud: cloud, Editor: ed, Ctx: context.Background(),
+		Exec: &Executor{SessionID: "conv1", Editor: ed, Advertised: map[string]bool{"read_file": true}, Ctx: context.Background()},
+	}
+	go s.Run()
+
+	cloud.events <- chat.Event{Kind: chat.KindMcpCall, McpCall: chat.McpCall{CallID: "c1", ToolName: "read_file", Params: map[string]any{"path": "big.bin"}}}
+
+	select {
+	case f := <-cloud.sent:
+		res, ok := f.(chat.McpResult)
+		if !ok {
+			t.Fatalf("expected an mcp_result, got %+v", f)
+		}
+		if res.Result["truncated"] != true {
+			t.Errorf("truncated = %v, want true", res.Result["truncated"])
+		}
+		data, err := chat.Encode(res)
+		if err != nil {
+			t.Fatalf("encode: %v", err)
+		}
+		if len(data) >= 1<<20 {
+			t.Errorf("encoded result is %d bytes; the server closes the connection over 1MB", len(data))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("executor result never sent back to cloud")
+	}
+}

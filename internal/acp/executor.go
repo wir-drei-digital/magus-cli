@@ -62,5 +62,13 @@ func (e *Executor) Handle(call chat.McpCall) chat.McpResult {
 	if err != nil {
 		return errResult(call, "read_error", err.Error())
 	}
-	return chat.McpResult{CallID: call.CallID, Status: "ok", Result: map[string]any{"content": rf.Content}}
+	// 4. Bound the frame. The editor's read is unbounded (it may be a whole
+	// binary file) and the server closes the connection on frames over 1MB.
+	// chat.Client.Send fits every mcp_result too — this second call is deliberate
+	// belt-and-braces so the invariant holds for any CloudConn wired in here.
+	return chat.FitMcpResult(chat.McpResult{
+		CallID: call.CallID,
+		Status: "ok",
+		Result: map[string]any{"content": rf.Content},
+	})
 }
