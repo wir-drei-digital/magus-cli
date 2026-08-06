@@ -176,6 +176,36 @@ The server bridge landed a "Breaking protocol changes" round (magus PR #29) that
 
 The frame budget is on the **encoded** size, which is the whole point: JSON escaping inflates content up to 6× (every control byte becomes a 6-byte `\u00XX`), so `magus chat`'s 256KiB raw ReadFile cap could still produce a ~1.5MB frame, and the ACP bridge forwarded editor reads with no cap at all. Enforcing at `Send` means neither front-end can forget; `internal/acp`'s executor applies the same fit at the producer so the invariant does not depend on which `CloudConn` is wired in.
 
+## Known residual risks (2026-08-06 final review)
+
+The final whole-branch review of `feat/chat-tui` closed four findings (server text is now sanitized before it reaches the terminal, audit-write failures are surfaced to the user, and the audit log's one verbatim server-supplied field is bounded). Three residuals were deliberately **parked** rather than fixed, and are recorded here so they are decisions rather than oversights.
+
+### 1. Terminal type-ahead can pre-answer an approval prompt
+
+`magus chat` reads the user's messages and their approval answers from one shared `bufio.Reader` over stdin. That sharing is correct and necessary — two readers over the same stream would have the first buffer ahead and swallow the approval line — but it does **not** make the approval prompt un-front-runnable, and the code comment that used to claim it did ("safe because the agent blocks on the tool call") was wrong.
+
+The attack: a hostile (or compromised) server streams a convincing **fake** approval prompt as ordinary `text.delta` chat text. The user answers it. Their keystrokes sit in the **tty's own input queue** — below any buffering this process controls — until the **real** prompt that follows reads them, so the real prompt is answered by a human who never saw it.
+
+Bounds, both of which have to hold for this to be worth anything to an attacker:
+
+- **Fail-safe by default.** `TerminalApprover` treats only `a` (allow once) and `A` (allow always) as consent; every other byte, including empty input and EOF, denies. Type-ahead that is not exactly one of those two characters denies the call.
+- **Small blast radius.** The only tool in the registry is `read_file`: read-only, confined to the already-approved `--root`, capped at 256 KiB, and written to `chat-audit.jsonl` either way. There is no write or exec tool to escalate into.
+- **The convincing part is now harder.** Painting a byte-identical fake prompt needs terminal control sequences (clear screen, cursor home, line rewind). `sanitizeStream` (`internal/cli/sanitize.go`) renders ESC, the rest of C0, DEL, and the C1 range U+0080–U+009F as inert `\xNN`/`\u00NN` text at all four points server strings reach the terminal, so the forgery can no longer repaint the screen — only append plausible-looking text below the real output.
+
+**Planned fix:** raw-mode terminal input in the deferred rich TUI, which flushes pending tty bytes (`tcflush`/`TCIFLUSH`) immediately before rendering an approval prompt, so nothing typed before the prompt existed can answer it. That needs `golang.org/x/term`, a module dependency this build deliberately does not add yet.
+
+### 2. Outbound chat frames are unbudgeted
+
+`chat.Client.Send` enforces the server's 1 MB inbound frame limit for `mcp_result` frames only (`FitMcpResult`, 768 KiB encoded budget). The `chat` frame carrying the user's own message is **not** budgeted. Per the server's wire contract an oversize frame **closes the connection with no error frame**, so pasting a >1 MB prompt ends the session with nothing on screen but `[connection closed]` — an unexplained failure the user cannot distinguish from a network drop.
+
+Not a security issue (the user is the only one who can trigger it, on their own session) and not reachable by typing — it needs a paste or a piped stdin. **Follow-up:** a local length check on the outbound message with a clear "message too large" error, before the frame is sent.
+
+### 3. Audit-log privacy modes are unix-only
+
+`FileAudit` treats securing the log as part of recording: every `Record` re-applies `0o600` to the file and creates the parent directory `0o700`, and a failed `Chmod` is a `Record` error, not a warning. Those modes mean what they say on unix. On Windows, `os.Chmod` maps only to the read-only bit — the file's ACL is inherited from its parent directory — so `0o600` **does not** make the log owner-only there, and `MkdirAll(0o700)` likewise does not restrict the directory. magus ships a Windows binary, so this is live.
+
+The log's contents are absolute local filesystem paths plus decisions, on a machine the user already controls; the exposure is to other local accounts on a shared Windows box. Left as-is rather than papered over, and stated here so the guarantee is not over-read. Closing it properly needs a build-tagged Windows path that sets a DACL (`golang.org/x/sys/windows`) — another dependency this build does not add. Note the same caveat already recorded for `syscall.O_NOFOLLOW` portability in the second review round above.
+
 ## Historical note (pre-build)
 
 The server bridge was **unbuilt** at the time of the original audit. The CLI↔server contract findings (§2) and the plan-vs-reality drifts (§3) are therefore design-time corrections to the plan, not live defects against a running server. They should be resolved before, and verified during, implementation of the bridge.

@@ -218,6 +218,228 @@ func TestRunChatReportsMidTurnDisconnect(t *testing.T) {
 	}
 }
 
+// A broken audit log is a security event: the reads keep executing and keep
+// returning content, so the trail stopping has to reach the only person who can
+// fix it. Once, though — a warning per tool call would bury the session output
+// and train the user to ignore it.
+func TestRunChatWarnsOnceWhenAuditingFails(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "mix.exs"), []byte("app: :magus"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	confDir := t.TempDir()
+	t.Setenv("MAGUS_CONFIG_DIR", confDir)
+
+	// The audit log's directory is a regular FILE, so MkdirAll fails on every
+	// Record — the read-only config dir / full disk case, deterministically.
+	blocked := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	results := make(chan string, 2)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close(websocket.StatusNormalClosure, "")
+		ctx := r.Context()
+
+		_, _, _ = c.Read(ctx) // hello
+		sh, _ := wrapTest("server_hello", map[string]any{"conversation_id": "c1", "accepted_tools": []string{"read_file"}})
+		_ = c.Write(ctx, websocket.MessageText, sh)
+
+		_, _, _ = c.Read(ctx) // chat
+		// Two calls in one turn: the second is what proves the warning is not
+		// repeated.
+		for _, id := range []string{"k1", "k2"} {
+			mc, _ := wrapTest("mcp_call", map[string]any{"call_id": id, "tool_name": "read_file", "params": map[string]any{"path": "mix.exs"}})
+			_ = c.Write(ctx, websocket.MessageText, mc)
+			_, data, _ := c.Read(ctx)
+			results <- string(data)
+		}
+		done, _ := wrapTest("chat_stream", map[string]any{"event": "turn.done", "data": map[string]any{}})
+		_ = c.Write(ctx, websocket.MessageText, done)
+	}))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/cli/chat"
+	in := strings.NewReader("what's in mix.exs?\na\na\n")
+	var out bytes.Buffer
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := runChat(ctx, chatOptions{
+		WSURL:     wsURL,
+		Token:     "tok",
+		UserAgent: "magus-cli/test",
+		Root:      root,
+		In:        in,
+		Out:       &out,
+		ConfigDir: blocked,
+	}); err != nil {
+		t.Fatalf("runChat: %v", err)
+	}
+
+	if got := strings.Count(out.String(), "audit log write failed"); got != 1 {
+		t.Errorf("audit warning appeared %d times, want exactly 1; output:\n%s", got, out.String())
+	}
+	if !strings.Contains(out.String(), "no longer being recorded locally") {
+		t.Errorf("warning does not say what stopped working; got %q", out.String())
+	}
+	// Non-fatal: both approved reads still ran and still returned their content.
+	close(results)
+	n := 0
+	for res := range results {
+		n++
+		if !strings.Contains(res, "app: :magus") {
+			t.Errorf("read %d did not return content: %s", n, res)
+		}
+	}
+	if n != 2 {
+		t.Errorf("expected 2 tool results, got %d", n)
+	}
+}
+
+// Server-streamed text is attacker-controlled and a terminal is an interpreter,
+// not a text sink: an unescaped "\x1b[2J\x1b[H" clears the screen and lets the
+// server paint a byte-identical fake approval prompt. Everything the server says
+// therefore goes through sanitizeStream on its way to Out.
+func TestRunChatSanitizesServerText(t *testing.T) {
+	root := t.TempDir()
+	confDir := t.TempDir()
+	t.Setenv("MAGUS_CONFIG_DIR", confDir)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close(websocket.StatusNormalClosure, "")
+		ctx := r.Context()
+
+		_, _, _ = c.Read(ctx) // hello
+		sh, _ := wrapTest("server_hello", map[string]any{"conversation_id": "c1", "accepted_tools": []string{"read_file"}})
+		_ = c.Write(ctx, websocket.MessageText, sh)
+
+		_, _, _ = c.Read(ctx) // chat
+		// Split across deltas, as a real stream would be: the screen-clear, the
+		// forged prompt, and ordinary prose that must survive intact.
+		for _, delta := range []string{
+			"\x1b[2J\x1b[H",
+			"\nThe cloud agent wants to run:\r",
+			"日本語 \U0001f389 ok",
+		} {
+			d, _ := wrapTest("chat_stream", map[string]any{"event": "text.delta", "data": map[string]any{"delta": delta}})
+			_ = c.Write(ctx, websocket.MessageText, d)
+		}
+		done, _ := wrapTest("chat_stream", map[string]any{"event": "turn.done", "data": map[string]any{}})
+		_ = c.Write(ctx, websocket.MessageText, done)
+	}))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/cli/chat"
+	var out bytes.Buffer
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := runChat(ctx, chatOptions{
+		WSURL:     wsURL,
+		Token:     "tok",
+		UserAgent: "magus-cli/test",
+		Root:      root,
+		In:        strings.NewReader("hi\n"),
+		Out:       &out,
+		ConfigDir: confDir,
+	}); err != nil {
+		t.Fatalf("runChat: %v", err)
+	}
+
+	got := out.String()
+	if strings.ContainsRune(got, 0x1b) || strings.ContainsRune(got, '\r') {
+		t.Errorf("server text reached the terminal with live control bytes: %q", got)
+	}
+	if !strings.Contains(got, `\x1b[2J`) {
+		t.Errorf("escape sequence not rendered as inert text; got %q", got)
+	}
+	if !strings.Contains(got, "日本語 \U0001f389 ok") {
+		t.Errorf("ordinary unicode was mangled; got %q", got)
+	}
+}
+
+// The stream "error" event and the WS close reason are server-controlled strings
+// too, and both are printed straight to the terminal.
+func TestRunChatSanitizesStreamError(t *testing.T) {
+	root := t.TempDir()
+	confDir := t.TempDir()
+	t.Setenv("MAGUS_CONFIG_DIR", confDir)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close(websocket.StatusNormalClosure, "")
+		ctx := r.Context()
+
+		_, _, _ = c.Read(ctx) // hello
+		sh, _ := wrapTest("server_hello", map[string]any{"conversation_id": "c1", "accepted_tools": []string{"read_file"}})
+		_ = c.Write(ctx, websocket.MessageText, sh)
+
+		_, _, _ = c.Read(ctx) // chat
+		e, _ := wrapTest("chat_stream", map[string]any{
+			"event": "error",
+			"data":  map[string]any{"message": "boom\x1b[2Jrepainted"},
+		})
+		_ = c.Write(ctx, websocket.MessageText, e)
+	}))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/cli/chat"
+	var out bytes.Buffer
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := runChat(ctx, chatOptions{
+		WSURL:     wsURL,
+		Token:     "tok",
+		UserAgent: "magus-cli/test",
+		Root:      root,
+		In:        strings.NewReader("hi\n"),
+		Out:       &out,
+		ConfigDir: confDir,
+	}); err != nil {
+		t.Fatalf("runChat: %v", err)
+	}
+
+	got := out.String()
+	if strings.ContainsRune(got, 0x1b) {
+		t.Errorf("stream error reached the terminal unescaped: %q", got)
+	}
+	if !strings.Contains(got, `boom\x1b[2Jrepainted`) {
+		t.Errorf("stream error not rendered inert; got %q", got)
+	}
+}
+
+// closedNotice prints the transport's close reason, which for a WS close frame
+// is a server-supplied string.
+func TestClosedNoticeSanitizesCloseReason(t *testing.T) {
+	var out bytes.Buffer
+	closedNotice(context.Background(), &out, errors.New("status = StatusInternalError and reason = \x1b[2Jgone"))
+
+	got := out.String()
+	if strings.ContainsRune(got, 0x1b) {
+		t.Errorf("close reason reached the terminal unescaped: %q", got)
+	}
+	if !strings.Contains(got, `\x1b[2Jgone`) {
+		t.Errorf("close reason not rendered inert; got %q", got)
+	}
+}
+
 // sendErr is what every cli.Send call site in runChat funnels its failures
 // through, so its three outcomes are pinned directly.
 func TestSendErrClassifiesFailures(t *testing.T) {

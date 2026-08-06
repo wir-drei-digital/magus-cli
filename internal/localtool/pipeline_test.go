@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/wir-drei-digital/magus-cli/internal/chat"
 	"github.com/wir-drei-digital/magus-cli/internal/config"
@@ -249,5 +250,173 @@ func TestPipelineAuditsEveryOutcome(t *testing.T) {
 		if strings.Contains(string(raw), marker) {
 			t.Errorf("audit log echoed raw server-supplied params (%q):\n%s", marker, raw)
 		}
+	}
+}
+
+// failingAudit is an Auditor that never records anything — a 0400 log, a full
+// disk, a read-only config directory.
+type failingAudit struct {
+	calls int
+	err   error
+}
+
+func (f *failingAudit) Record(AuditEntry) error {
+	f.calls++
+	return f.err
+}
+
+// FileAudit was deliberately hardened to SURFACE its failures (close errors
+// propagate, a failed chmod is an error, not a warning) — which buys nothing if
+// its only consumer throws the error away. A log that has stopped recording is
+// a security event: reads keep executing and keep returning content, so the one
+// person who can act on it must be told. The pipeline reports it through
+// OnAuditError and otherwise carries on: auditing is not a gate, and failing the
+// call closed would let a broken log file become a denial of service.
+func TestPipelineReportsAuditFailures(t *testing.T) {
+	tests := []struct {
+		name       string
+		perms      config.Permissions
+		approver   Approver
+		tool       string
+		params     map[string]any
+		wantStatus string
+	}{
+		{"allow path", config.Permissions{Read: "prompt"}, stubApprover{DecisionAllow}, "read_file", map[string]any{"path": "ok.txt"}, "ok"},
+		{"deny path", config.Permissions{Read: "deny"}, stubApprover{DecisionAllow}, "read_file", map[string]any{"path": "ok.txt"}, "denied"},
+		{"pre-Plan rejection", config.Permissions{Read: "prompt"}, stubApprover{DecisionAllow}, "exec_command", map[string]any{}, "denied"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p, _ := newPipeline(t, tc.approver, tc.perms)
+			boom := errors.New("no space left on device")
+			audit := &failingAudit{err: boom}
+			p.Audit = audit
+
+			var got []error
+			p.OnAuditError = func(err error) { got = append(got, err) }
+
+			res := p.Handle(chat.McpCall{CallID: "1", ToolName: tc.tool, Params: tc.params})
+
+			if audit.calls != 1 {
+				t.Fatalf("expected exactly one Record attempt, got %d", audit.calls)
+			}
+			if len(got) != 1 {
+				t.Fatalf("audit failure was not surfaced: callback got %v", got)
+			}
+			if !errors.Is(got[0], boom) {
+				t.Errorf("callback got %v, want the underlying %v", got[0], boom)
+			}
+			// The decision itself is unaffected — the cloud still gets the same
+			// answer it would have got with a healthy log.
+			if res.Status != tc.wantStatus {
+				t.Errorf("status = %q, want %q (audit must stay non-fatal): %+v", res.Status, tc.wantStatus, res)
+			}
+			if tc.wantStatus == "ok" && res.Result["content"] != "hello" {
+				t.Errorf("result changed by the audit failure: %+v", res.Result)
+			}
+		})
+	}
+}
+
+// A nil OnAuditError is the documented default (the ACP front-end wires no
+// callback), so a failing log must not panic the session.
+func TestPipelineAuditFailureWithoutCallback(t *testing.T) {
+	p, _ := newPipeline(t, stubApprover{DecisionAllow}, config.Permissions{Read: "prompt"})
+	p.Audit = &failingAudit{err: errors.New("boom")}
+
+	if res := p.Handle(chat.McpCall{CallID: "1", ToolName: "read_file", Params: map[string]any{"path": "ok.txt"}}); res.Status != "ok" {
+		t.Fatalf("expected ok, got %+v", res)
+	}
+}
+
+// A healthy log must not cry wolf: OnAuditError exists to report a broken audit
+// trail, and a callback that fires on success would train the user to ignore it.
+func TestPipelineDoesNotReportSuccessfulAudits(t *testing.T) {
+	p, _ := newPipeline(t, stubApprover{DecisionAllow}, config.Permissions{Read: "prompt"})
+	called := 0
+	p.OnAuditError = func(error) { called++ }
+
+	if res := p.Handle(chat.McpCall{CallID: "1", ToolName: "read_file", Params: map[string]any{"path": "ok.txt"}}); res.Status != "ok" {
+		t.Fatalf("setup: expected ok, got %+v", res)
+	}
+	if called != 0 {
+		t.Errorf("OnAuditError fired %d times for a successful write", called)
+	}
+}
+
+// The tool name on a rejection is raw server input, and it is the ONE field the
+// log copies verbatim (there is no Plan yet to render). Unbounded, that makes
+// the audit log a server-writable growth vector: the 8MB inbound frame limit is
+// the only other bound, so each rejected call could append megabytes to
+// chat-audit.jsonl. Bound it at the record, where the untrusted value enters the
+// file.
+func TestPipelineBoundsAuditedToolName(t *testing.T) {
+	tests := []struct {
+		name string
+		tool string
+	}{
+		{"ascii", strings.Repeat("A", 100_000)},
+		// Multi-byte: the cut must land on a rune boundary, or the log line
+		// carries a mangled half-rune (and JSON-encodes it as U+FFFD).
+		{"multi-byte runes", strings.Repeat("é", 100)},        // 2 bytes each
+		{"three-byte runes", strings.Repeat("世", 100)},        // 3 bytes each
+		{"four-byte runes", strings.Repeat("\U0001f600", 50)}, // 4 bytes each
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			logPath := filepath.Join(t.TempDir(), "audit.jsonl")
+			p, _ := newPipeline(t, stubApprover{DecisionAllow}, config.Permissions{Read: "prompt"})
+			p.Audit = &FileAudit{Path: logPath}
+
+			// An unadvertised tool is rejected at step 1, before any Plan exists,
+			// so the raw name is what reaches recordOrTool.
+			if res := p.Handle(chat.McpCall{CallID: "1", ToolName: tc.tool, Params: map[string]any{}}); res.Status != "denied" {
+				t.Fatalf("setup: expected denied, got %+v", res)
+			}
+
+			entries := readAuditLines(t, logPath)
+			if len(entries) != 1 {
+				t.Fatalf("expected 1 audit line, got %d", len(entries))
+			}
+			logged := entries[0].Tool
+			if len(logged) > maxAuditToolName {
+				t.Errorf("logged tool name is %d bytes, want <= %d", len(logged), maxAuditToolName)
+			}
+			if logged == "" {
+				t.Error("the log must still say what was refused")
+			}
+			if !utf8.ValidString(logged) {
+				t.Errorf("truncation split a rune: %q", logged)
+			}
+			if !strings.HasPrefix(tc.tool, logged) {
+				t.Errorf("logged name %q is not a prefix of the requested name", logged)
+			}
+			// The whole point: the line stays small no matter what was sent.
+			raw, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(raw) > 1024 {
+				t.Errorf("audit line is %d bytes for a %d-byte tool name", len(raw), len(tc.tool))
+			}
+		})
+	}
+}
+
+// A tool name that is already short is API the log should reproduce exactly —
+// truncation must not nibble at ordinary names.
+func TestPipelineKeepsShortToolNamesVerbatim(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	p, _ := newPipeline(t, stubApprover{DecisionAllow}, config.Permissions{Read: "prompt"})
+	p.Audit = &FileAudit{Path: logPath}
+
+	const name = "exec_command"
+	if res := p.Handle(chat.McpCall{CallID: "1", ToolName: name, Params: map[string]any{}}); res.Status != "denied" {
+		t.Fatalf("setup: expected denied, got %+v", res)
+	}
+	if got := readAuditLines(t, logPath)[0].Tool; got != name {
+		t.Errorf("tool = %q, want %q", got, name)
 	}
 }

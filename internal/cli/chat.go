@@ -108,9 +108,30 @@ func runChat(ctx context.Context, opts chatOptions) error {
 
 	// ONE reader over opts.In, shared with the approver: two bufio.Readers over
 	// the same stream would have the first buffer ahead and swallow the approval
-	// line. Safe because the agent blocks on the tool call — the user is
-	// answering a prompt, not typing a new message.
+	// line. Buffer-stealing between message reads and approval reads is the
+	// property this buys, and it is the only one.
+	//
+	// It does NOT make the approval prompt un-front-runnable. Known residual,
+	// tracked in docs/superpowers/2026-06-22-acp-chat-audit.md: a hostile server
+	// can stream a convincing FAKE approval prompt as ordinary chat text, and
+	// whatever the user types in reply sits in the tty's own input queue until
+	// the REAL prompt reads it — pre-answering a question the user never saw.
+	// Bounded on both sides: it fails safe unless that type-ahead is exactly "a"
+	// or "A" (every other byte denies), and the most it can approve is a single
+	// read-only, size-capped, audited read beneath the already-approved root.
+	// Closing it needs raw-mode input that flushes pending tty bytes before
+	// prompting (tcflush), which lands with the deferred rich TUI and the x/term
+	// dependency this build deliberately does not add yet. sanitizeStream
+	// (sanitize.go) removes the escape sequences that would let the fake prompt
+	// be painted convincingly in the first place.
 	reader := bufio.NewReader(opts.In)
+
+	// Auditing is not a gate — the read has already run and its result still
+	// goes back to the cloud — but a log that has stopped recording is a
+	// security event, and FileAudit was built to surface exactly this. Say it
+	// once: a line per tool call would bury the session and train the user to
+	// scroll past it.
+	auditWarned := false
 	pipeline := &localtool.Pipeline{
 		Registry: reg,
 		Policy:   localtool.NewPolicy(cfg.Chat.Permissions),
@@ -130,6 +151,13 @@ func runChat(ctx context.Context, opts chatOptions) error {
 				// re-approving the same file every session with no idea why.
 				fmt.Fprintf(opts.Out, "warning: could not save the \"allow always\" rule: %v\n", err)
 			}
+		},
+		OnAuditError: func(err error) {
+			if auditWarned {
+				return
+			}
+			auditWarned = true
+			fmt.Fprintf(opts.Out, "\nwarning: audit log write failed: %v; decisions are no longer being recorded locally\n", err)
 		},
 	}
 	// Without a config directory there is nowhere the audit log belongs; writing
@@ -168,14 +196,17 @@ func runChat(ctx context.Context, opts chatOptions) error {
 		case chat.KindChatStream:
 			switch ev.ChatStream.Event {
 			case "text.delta":
+				// Server text, straight to a terminal: sanitize at the write.
+				// Applied per delta because that is the unit the server chose;
+				// sanitizeStream is stateless and safe chunk by chunk.
 				if d, ok := ev.ChatStream.Data["delta"].(string); ok {
-					fmt.Fprint(opts.Out, d)
+					fmt.Fprint(opts.Out, sanitizeStream(d))
 				}
 			case "turn.done":
 				fmt.Fprintln(opts.Out)
 				return nil // skeleton: one turn per session
 			case "error":
-				fmt.Fprintf(opts.Out, "\n[error] %v\n", ev.ChatStream.Data["message"])
+				fmt.Fprintf(opts.Out, "\n[error] %s\n", sanitizeStream(fmt.Sprint(ev.ChatStream.Data["message"])))
 				return nil
 			}
 
@@ -186,7 +217,13 @@ func runChat(ctx context.Context, opts chatOptions) error {
 			}
 
 		case chat.KindError:
-			return ev.Err
+			// An error frame's code and message are server-supplied, and this
+			// error is printed verbatim to stderr by main — a terminal like any
+			// other — so it gets the same treatment as the rest of the server's
+			// text. Re-wrapping loses the error chain; nothing above runChat
+			// inspects it. fmt.Sprint rather than .Error() so a nil Err cannot
+			// panic here.
+			return errors.New(sanitizeStream(fmt.Sprint(ev.Err)))
 
 		case chat.KindClosed:
 			closedNotice(ctx, opts.Out, ev.Err)
@@ -228,5 +265,7 @@ func closedNotice(ctx context.Context, out io.Writer, err error) {
 		fmt.Fprintln(out, "\n[connection closed]")
 		return
 	}
-	fmt.Fprintf(out, "\n[connection closed: %v]\n", err)
+	// A WS close frame carries a server-supplied reason string, which lands in
+	// this error verbatim — so it is sanitized like any other server text.
+	fmt.Fprintf(out, "\n[connection closed: %s]\n", sanitizeStream(fmt.Sprint(err)))
 }
