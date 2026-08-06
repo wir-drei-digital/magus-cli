@@ -1,3 +1,27 @@
+// Package chat speaks the magus cloud chat protocol: {type, v} framed JSON over
+// one WebSocket, shared by both front-ends (`magus chat` and the `magus acp`
+// bridge).
+//
+// Server contract this client is written against (magus PR #29):
+//
+//   - hello is sent exactly ONCE per connection. Reconnecting means a new socket
+//     plus a fresh hello carrying conversation.resume; a second hello on a live
+//     connection is answered with an already_initialized error frame.
+//   - Any session_id we send is ignored: the server routes by authenticated user
+//     id plus its own resolved conversation id. We keep sending ours because it
+//     is what correlates frames on THIS side.
+//   - Tokens must be write-scoped. A read-scoped token is rejected at connect
+//     with HTTP 403 insufficient_scope; an invalid or expired one with 401 (see
+//     dialErr in client.go).
+//   - Error frame codes to expect: not_ready (chat before hello), bad_frame
+//     (undecodable frame or missing text), already_initialized. They arrive as
+//     ordinary error frames and surface as KindError events.
+//   - Idle contract: the server times out a receive after 60s and wants a ping
+//     at least once a minute; the write loop pings every 25s.
+//   - Inbound frames are capped at 1MB and an OVERSIZE FRAME CLOSES THE
+//     CONNECTION — there is no error frame for it. Outbound mcp_result frames
+//     are therefore budgeted by encoded size in FitMcpResult (fit.go), applied
+//     at the Client.Send choke point so no front-end can forget.
 package chat
 
 import (

@@ -162,6 +162,20 @@ All fixes tested (`go test ./...` green; `-race -count=3` clean on `internal/acp
 
 The magus Phoenix server bridge (`2026-06-02-magus-chat-server-bridge.md`) has since been **implemented** on the magus branch `feat/cli-chat-bridge` (13 commits) via the same subagent-driven process: all 10 plan tasks + the ACP-parity test, each individually spec+quality reviewed, plus a final whole-branch review. The full suite is green (compile `--warnings-as-errors`, `format --check-formatted`, 38 tests across `remote/` + `web/cli/` + `cli/` + dispatcher). `GET /cli/chat` is live and PAT-authenticated. The final whole-branch review's one Important finding — the connection Registry key was the raw client `session_id` (a global namespace; a dropped-then-reclaimed key could cross tenants) — was fixed by namespacing the routing key as `"<user_id>:<session_id>"` (contained in `ChatSocket`; proxy/injection/dispatcher unchanged). Documented follow-ups: reap the `pending` map on abandoned calls; return the turn's message id so the CLI can correlate `turn.done` under concurrent drivers; consider requiring write-scope (v1 allows any valid token); tolerate `nil` `turn.done` message_id on the CLI.
 
+### Protocol sync (2026-08-06)
+
+The server bridge landed a "Breaking protocol changes" round (magus PR #29) that hardened the wire contract. Five points, and where the CLI stands on each:
+
+| Contract point | CLI status |
+| --- | --- |
+| `hello` exactly once per connection; reconnect = new socket + `conversation.resume`; a second hello gets `already_initialized` | Already compliant — both front-ends send one hello per connection. |
+| Any client `session_id` is ignored (the server routes by authenticated user id + its own conversation id); clients may keep sending it | No change — our `session_id` still correlates frames on this side. |
+| Write-scoped tokens required: read-scoped → HTTP **403** `insufficient_scope`, invalid/expired → **401** | `chat.Dial` now maps both statuses to an actionable message (`dialErr`) instead of "expected handshake response status code 101 but got 403". |
+| New error codes `not_ready`, `bad_frame`, `already_initialized`; 60s idle receive timeout with a ping at least once a minute | Already covered — generic error-frame handling surfaces any code, and the write loop pings every 25s. |
+| **Inbound frames capped at 1MB; an oversize frame CLOSES the connection** (no error frame) | Enforced transport-side: `chat.Client.Send` runs every `mcp_result` through `FitMcpResult` (768KiB encoded budget), truncating `result.content` at a rune boundary and setting `result.truncated`, or failing closed with an `oversized_result` tool error. |
+
+The frame budget is on the **encoded** size, which is the whole point: JSON escaping inflates content up to 6× (every control byte becomes a 6-byte `\u00XX`), so `magus chat`'s 256KiB raw ReadFile cap could still produce a ~1.5MB frame, and the ACP bridge forwarded editor reads with no cap at all. Enforcing at `Send` means neither front-end can forget; `internal/acp`'s executor applies the same fit at the producer so the invariant does not depend on which `CloudConn` is wired in.
+
 ## Historical note (pre-build)
 
 The server bridge was **unbuilt** at the time of the original audit. The CLI↔server contract findings (§2) and the plan-vs-reality drifts (§3) are therefore design-time corrections to the plan, not live defects against a running server. They should be resolved before, and verified during, implementation of the bridge.
